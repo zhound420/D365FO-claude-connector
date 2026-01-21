@@ -6,8 +6,11 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
+import { formatTiming } from "../progress.js";
 
 /**
  * Supported aggregation functions
@@ -698,8 +701,10 @@ Examples:
         "When true, fetches ALL records for exact aggregation (no 5K limit). Shows progress metrics."
       ),
     },
-    async ({ entity, aggregations, filter, groupBy, maxRecords, accurate }) => {
+    async ({ entity, aggregations, filter, groupBy, maxRecords, accurate }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       try {
+        const startTime = Date.now();
+
         // Check if this is a simple COUNT(*) with no groupBy
         const isSimpleCount =
           aggregations.length === 1 &&
@@ -713,11 +718,12 @@ Examples:
           const count = await tryFastCount(client, entity, filter);
           if (count !== null) {
             const alias = aggregations[0].alias || "count_all";
+            const timing = formatTiming(Date.now() - startTime);
             return {
               content: [
                 {
                   type: "text",
-                  text: `Aggregation Results\nMethod: Server-side (/$count)\n\n${alias}: ${count.toLocaleString()}`,
+                  text: `Aggregation Results\nMethod: Server-side (/$count)${timing}\n\n${alias}: ${count.toLocaleString()}`,
                 },
               ],
             };

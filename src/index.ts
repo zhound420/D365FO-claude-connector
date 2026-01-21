@@ -29,7 +29,7 @@ import { MetadataCache } from "./metadata-cache.js";
 import { registerAllResources } from "./resources/index.js";
 import { registerAllTools } from "./tools/index.js";
 
-const SERVER_NAME = "d365fo-mcp-server";
+const SERVER_NAME = "Microsoft D365";
 const SERVER_VERSION = "2.0.0";
 
 /**
@@ -48,6 +48,12 @@ function createServer(): McpServer {
   // Initialize D365 client and metadata cache
   const client = new D365Client(config);
   const metadataCache = new MetadataCache(client);
+
+  // Pre-load entity names for faster tool responses (fast tier)
+  // Full EDMX metadata will be loaded on-demand when detailed schema is needed
+  metadataCache.ensureEntityNamesLoaded().catch((err) => {
+    logError("Failed to pre-load entity list (tools will retry on first use)", err);
+  });
 
   // Register resources (for schema discovery)
   registerAllResources(server, metadataCache);

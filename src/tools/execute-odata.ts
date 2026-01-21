@@ -4,8 +4,11 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
+import { ProgressReporter } from "../progress.js";
 
 /**
  * Default max records for auto-pagination
@@ -18,13 +21,16 @@ const DEFAULT_MAX_RECORDS = 50000;
 async function executeWithPagination(
   client: D365Client,
   initialPath: string,
-  maxRecords: number
+  maxRecords: number,
+  progress?: ProgressReporter
 ): Promise<{
   records: unknown[];
   totalCount?: number;
   pagesFetched: number;
   truncated: boolean;
+  elapsedMs: number;
 }> {
+  const startTime = Date.now();
   const allRecords: unknown[] = [];
   let pagesFetched = 0;
   let totalCount: number | undefined;
@@ -51,6 +57,12 @@ async function executeWithPagination(
       allRecords.push(...response.value);
     }
 
+    // Report progress for pagination
+    if (progress && pagesFetched > 1) {
+      const totalInfo = totalCount !== undefined ? ` of ${totalCount.toLocaleString()}` : "";
+      await progress.report(`Fetching page ${pagesFetched}... (${allRecords.length.toLocaleString()}${totalInfo} records)`);
+    }
+
     // Check if we've hit the max records limit
     if (allRecords.length >= maxRecords) {
       truncated = true;
@@ -65,6 +77,7 @@ async function executeWithPagination(
     totalCount,
     pagesFetched,
     truncated,
+    elapsedMs: Date.now() - startTime,
   };
 }
 
@@ -98,18 +111,21 @@ Auto-pagination:
         `Maximum records to fetch when fetchAll=true (default: ${DEFAULT_MAX_RECORDS})`
       ),
     },
-    async ({ path, fetchAll, maxRecords }) => {
+    async ({ path, fetchAll, maxRecords }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       try {
         // Normalize path - ensure it starts with /
         const normalizedPath = path.startsWith("/") ? path : `/${path}`;
 
         // Handle auto-pagination if requested
         if (fetchAll) {
-          const result = await executeWithPagination(client, normalizedPath, maxRecords);
+          const progress = new ProgressReporter(server, "execute_odata", extra.sessionId);
+          await progress.report("Starting paginated fetch...");
+
+          const result = await executeWithPagination(client, normalizedPath, maxRecords, progress);
 
           const lines: string[] = [];
 
-          // Summary
+          // Summary with timing
           let summary = `Fetched ${result.records.length.toLocaleString()} record(s)`;
           if (result.totalCount !== undefined) {
             summary += ` of ${result.totalCount.toLocaleString()} total`;
@@ -117,6 +133,10 @@ Auto-pagination:
           summary += ` (${result.pagesFetched} page(s))`;
           if (result.truncated) {
             summary += ` [truncated at maxRecords=${maxRecords}]`;
+          }
+          // Add timing if operation took more than 2 seconds
+          if (result.elapsedMs >= 2000) {
+            summary += ` (${(result.elapsedMs / 1000).toFixed(1)}s)`;
           }
           lines.push(summary);
           lines.push("");

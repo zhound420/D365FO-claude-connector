@@ -19,6 +19,7 @@ An MCP (Model Context Protocol) server that provides read access to Microsoft Dy
 | Entities List | `d365://entities?filter=<pattern>` | List all entities with optional wildcard filtering |
 | Entity Schema | `d365://entity/{entityName}` | Full schema for any entity (fields, keys, navigation properties) |
 | Enum Definitions | `d365://enums` | All enum types with their values |
+| Saved Queries | `d365://queries` | List saved query templates |
 
 ### Tools
 
@@ -28,6 +29,13 @@ An MCP (Model Context Protocol) server that provides read access to Microsoft Dy
 | `execute_odata` | Execute raw OData paths (queries, single records, counts) |
 | `execute_code` | Run JavaScript in a secure sandbox with D365 API access |
 | `aggregate` | Perform aggregations (SUM, AVG, COUNT, MIN, MAX) on entity data |
+| `get_related` | Follow entity relationships to retrieve related records |
+| `export` | Export query results to CSV, JSON, or TSV format |
+| `compare_periods` | YoY, QoQ, MoM period comparisons with change calculations |
+| `trending` | Time series analysis with growth rates and moving averages |
+| `save_query` | Save reusable query templates with parameter support |
+| `execute_saved_query` | Execute saved query templates with parameter substitution |
+| `delete_saved_query` | Delete saved query templates |
 
 ## Installation
 
@@ -81,7 +89,7 @@ Add to your Claude Desktop config file:
 ```json
 {
   "mcpServers": {
-    "d365": {
+    "Microsoft D365": {
       "command": "node",
       "args": ["/path/to/d365fo-mcp-server/dist/index.js"],
       "env": {
@@ -102,7 +110,7 @@ Add to `~/.claude/settings.json`:
 ```json
 {
   "mcpServers": {
-    "d365": {
+    "Microsoft D365": {
       "command": "node",
       "args": ["/path/to/d365fo-mcp-server/dist/index.js"],
       "env": {
@@ -388,6 +396,173 @@ Perform aggregations on D365 entity data. Uses fast `/$count` for simple COUNT o
 { "entity": "SalesOrderLines", "aggregations": [{"function": "SUM", "field": "LineAmount"}], "groupBy": ["ItemNumber"] }
 ```
 
+#### `get_related`
+
+Follow entity relationships to retrieve related records in a single call.
+
+**Parameters:**
+- `entity` (string, required): Source entity name
+- `key` (string | object, required): Primary key of source record
+- `relationship` (string, required): Navigation property name to follow
+- `select` (string[], optional): Fields to include from related entity
+- `filter` (string, optional): Filter to apply to related records
+- `top` (number, optional): Maximum related records (default: 1000)
+
+**Examples:**
+```json
+// Get order lines for an order
+{ "entity": "SalesOrderHeaders", "key": "SO-001", "relationship": "SalesOrderLines" }
+
+// With compound key
+{ "entity": "SalesOrderHeaders", "key": {"DataAreaId": "usmf", "SalesOrderNumber": "SO-001"}, "relationship": "SalesOrderLines" }
+
+// With field selection and filter
+{ "entity": "SalesOrderHeaders", "key": "SO-001", "relationship": "SalesOrderLines", "select": ["ItemNumber", "LineAmount"], "filter": "LineAmount gt 1000" }
+```
+
+#### `export`
+
+Export D365 entity data to CSV, JSON, or TSV format.
+
+**Parameters:**
+- `entity` (string, required): Entity to export
+- `format` ("json" | "csv" | "tsv", optional): Output format (default: "json")
+- `select` (string[], optional): Fields to include
+- `filter` (string, optional): OData $filter expression
+- `orderBy` (string, optional): OData $orderby expression
+- `maxRecords` (number, optional): Maximum records (default: 10000)
+- `includeHeaders` (boolean, optional): Include header row for CSV/TSV (default: true)
+
+**Examples:**
+```json
+// JSON export with field selection
+{ "entity": "CustomersV3", "format": "json", "select": ["CustomerAccount", "CustomerName"] }
+
+// CSV export with filter
+{ "entity": "SalesOrderLines", "format": "csv", "filter": "SalesOrderNumber eq 'SO-001'" }
+
+// TSV with ordering and limit
+{ "entity": "Products", "format": "tsv", "orderBy": "ProductName asc", "maxRecords": 500 }
+```
+
+#### `compare_periods`
+
+Compare aggregations between two time periods (YoY, QoQ, MoM, or custom ranges).
+
+**Parameters:**
+- `entity` (string, required): Entity to analyze
+- `dateField` (string, required): Date/datetime field for filtering
+- `aggregations` (array, required): Same as aggregate tool
+- `comparisonType` ("YoY" | "QoQ" | "MoM" | "custom", required): Type of comparison
+- `referenceDate` (string, optional): Reference date for calculations (default: today)
+- `period1`, `period2` (objects, optional): Custom period ranges
+- `filter` (string, optional): Additional OData filter
+- `groupBy` (string[], optional): Fields to group by
+
+**Examples:**
+```json
+// Year-over-Year comparison
+{ "entity": "SalesOrderLines", "dateField": "CreatedDateTime", "comparisonType": "YoY", "aggregations": [{"function": "SUM", "field": "LineAmount"}] }
+
+// Month-over-Month with grouping
+{ "entity": "SalesOrderLines", "dateField": "CreatedDateTime", "comparisonType": "MoM", "aggregations": [{"function": "COUNT", "field": "*"}], "groupBy": ["ItemGroup"] }
+
+// Custom date ranges
+{ "entity": "SalesOrderLines", "dateField": "CreatedDateTime", "comparisonType": "custom", "aggregations": [{"function": "SUM", "field": "LineAmount"}], "period1": {"start": "2024-01-01", "end": "2024-03-31"}, "period2": {"start": "2023-01-01", "end": "2023-03-31"} }
+```
+
+#### `trending`
+
+Time series analysis with aggregation, growth rates, and moving averages.
+
+**Parameters:**
+- `entity` (string, required): Entity to analyze
+- `dateField` (string, required): Date/datetime field for bucketing
+- `valueField` (string, required): Numeric field to aggregate
+- `aggregation` ("SUM" | "AVG" | "COUNT" | "MIN" | "MAX", optional): Default: "SUM"
+- `granularity` ("day" | "week" | "month" | "quarter" | "year", optional): Default: "month"
+- `periods` (number, optional): Number of periods to analyze (default: 12)
+- `endDate` (string, optional): End date for analysis (default: today)
+- `filter` (string, optional): Additional OData filter
+- `movingAverageWindow` (number, optional): Window size for MA calculation
+- `includeGrowthRate` (boolean, optional): Include growth rates (default: true)
+
+**Examples:**
+```json
+// Monthly revenue trend
+{ "entity": "SalesOrderLines", "dateField": "CreatedDateTime", "valueField": "LineAmount", "granularity": "month", "periods": 12 }
+
+// Weekly order count with moving average
+{ "entity": "SalesOrderHeaders", "dateField": "OrderDate", "valueField": "*", "aggregation": "COUNT", "granularity": "week", "movingAverageWindow": 4 }
+
+// Quarterly with filter
+{ "entity": "SalesOrderLines", "dateField": "CreatedDateTime", "valueField": "LineAmount", "granularity": "quarter", "filter": "ItemGroup eq 'Electronics'" }
+```
+
+#### `save_query`
+
+Save a reusable query template for later execution. Use `{{paramName}}` for substitutable parameters.
+
+**Parameters:**
+- `name` (string, required): Unique name for the query
+- `description` (string, optional): Description of the query
+- `entity` (string, required): Entity to query
+- `select` (string[], optional): Fields to select
+- `filter` (string, optional): OData $filter (use `{{paramName}}` for parameters)
+- `orderBy` (string, optional): OData $orderby expression
+- `top` (number, optional): Maximum records
+- `expand` (string, optional): OData $expand expression
+
+**Examples:**
+```json
+// Basic query
+{ "name": "active_customers", "entity": "CustomersV3", "filter": "IsActive eq true" }
+
+// With parameters
+{ "name": "customer_orders", "entity": "SalesOrderHeaders", "filter": "CustomerAccount eq '{{customerId}}'" }
+
+// Complex query with description
+{ "name": "recent_sales", "description": "Recent sales for analysis", "entity": "SalesOrderLines", "select": ["ItemNumber", "LineAmount"], "filter": "CreatedDateTime ge {{startDate}}", "orderBy": "CreatedDateTime desc", "top": 100 }
+```
+
+#### `execute_saved_query`
+
+Execute a previously saved query template.
+
+**Parameters:**
+- `name` (string, required): Name of the saved query
+- `params` (object, optional): Parameter values to substitute
+- `fetchAll` (boolean, optional): Fetch all pages (default: false)
+- `maxRecords` (number, optional): Max records when fetchAll=true (default: 50000)
+
+**Examples:**
+```json
+// Simple execution
+{ "name": "active_customers" }
+
+// With parameters
+{ "name": "customer_orders", "params": {"customerId": "US-001"} }
+
+// Multiple parameters with pagination
+{ "name": "date_range_sales", "params": {"startDate": "2024-01-01", "endDate": "2024-12-31"}, "fetchAll": true }
+```
+
+#### `delete_saved_query`
+
+Delete a saved query template.
+
+**Parameters:**
+- `name` (string, required): Name of the query to delete
+
+#### `d365://queries`
+
+Resource that lists all saved query templates.
+
+**Response includes:**
+- Query count and list
+- Each query's name, description, entity, and parameters
+- Usage instructions
+
 ## OData Query Syntax
 
 ### Filter Examples
@@ -469,17 +644,26 @@ src/
 │   ├── index.ts          # Resource registration
 │   ├── entities.ts       # d365://entities resource
 │   ├── entity.ts         # d365://entity/{name} resource
-│   └── enums.ts          # d365://enums resource
+│   ├── enums.ts          # d365://enums resource
+│   └── queries.ts        # d365://queries resource
 ├── sandbox/
 │   ├── index.ts          # SandboxManager (isolated-vm)
 │   ├── d365-api.ts       # D365 API bindings for sandbox
 │   └── types.ts          # Sandbox type definitions
+├── utils/
+│   ├── date-utils.ts     # Date period calculations
+│   └── csv-utils.ts      # CSV/TSV formatting
 └── tools/
     ├── index.ts          # Tool registration
     ├── describe-entity.ts
     ├── execute-odata.ts
     ├── execute-code.ts
-    └── aggregate.ts
+    ├── aggregate.ts
+    ├── get-related.ts    # Relationship navigation
+    ├── export.ts         # CSV/JSON/TSV export
+    ├── compare-periods.ts # Period comparisons
+    ├── trending.ts       # Time series analysis
+    └── saved-queries.ts  # Query templates
 ```
 
 ## Security Considerations

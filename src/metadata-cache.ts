@@ -30,8 +30,103 @@ export class MetadataCache {
   private cache: MetadataCacheEntry | null = null;
   private loadingPromise: Promise<void> | null = null;
 
+  // Quick entity list (fast tier)
+  private entityNames: Set<string> | null = null;
+  private entityNamesLoading: Promise<void> | null = null;
+
   constructor(client: D365Client) {
     this.client = client;
+  }
+
+  /**
+   * Quick load - just entity names from root endpoint
+   * Much faster than full EDMX metadata
+   */
+  async ensureEntityNamesLoaded(): Promise<void> {
+    if (this.entityNames) return;
+
+    // If full cache is loaded, derive entity names from it
+    if (this.cache && this.cache.entities.size > 0) {
+      this.entityNames = new Set(this.cache.entities.keys());
+      return;
+    }
+
+    // Avoid concurrent loading
+    if (this.entityNamesLoading) {
+      return this.entityNamesLoading;
+    }
+
+    this.entityNamesLoading = this.loadEntityNames();
+    try {
+      await this.entityNamesLoading;
+    } finally {
+      this.entityNamesLoading = null;
+    }
+  }
+
+  private async loadEntityNames(): Promise<void> {
+    const startTime = Date.now();
+    log("Loading D365 entity list...");
+
+    const names = await this.client.fetchEntityList();
+    this.entityNames = new Set(names);
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    log(`Entity list ready: ${names.length} entities (${elapsed}s)`);
+  }
+
+  /**
+   * Check if entity exists (fast, uses entity names only)
+   */
+  async entityExists(name: string): Promise<boolean> {
+    await this.ensureEntityNamesLoaded();
+    return this.entityNames?.has(name) ?? false;
+  }
+
+  /**
+   * Infer basic schema from a sample record (fast path)
+   */
+  inferSchemaFromSample(entityName: string, sample: Record<string, unknown>): EntityDefinition {
+    const fields: EntityField[] = [];
+
+    for (const [name, value] of Object.entries(sample)) {
+      // Skip OData metadata fields
+      if (name.startsWith("@odata")) continue;
+
+      fields.push({
+        name,
+        type: this.inferType(value),
+        nullable: value === null,
+        isEnum: false,
+      });
+    }
+
+    return {
+      name: entityName,
+      description: "(Schema inferred from sample data)",
+      isCustom: false,
+      fields,
+      keys: [],  // Can't infer keys from sample
+      navigationProperties: [],  // Can't infer nav props from sample
+    };
+  }
+
+  /**
+   * Infer type from a sample value
+   */
+  private inferType(value: unknown): string {
+    if (value === null) return "Unknown";
+    if (typeof value === "string") {
+      // Check for date patterns
+      if (/^\d{4}-\d{2}-\d{2}/.test(value)) return "DateTimeOffset";
+      if (/^[0-9a-f]{8}-[0-9a-f]{4}/.test(value)) return "Guid";
+      return "String";
+    }
+    if (typeof value === "number") {
+      return Number.isInteger(value) ? "Int64" : "Decimal";
+    }
+    if (typeof value === "boolean") return "Boolean";
+    return "Unknown";
   }
 
   /**
@@ -60,11 +155,11 @@ export class MetadataCache {
    * Load and parse metadata from D365
    */
   private async loadMetadata(): Promise<void> {
-    log("Loading D365 metadata...");
+    log("Loading full D365 schema (this may take a while)...");
     const startTime = Date.now();
 
     const rawMetadata = await this.client.fetchMetadata();
-    log(`Metadata fetched (${(rawMetadata.length / 1024 / 1024).toFixed(2)} MB)`);
+    log(`Schema fetched (${(rawMetadata.length / 1024 / 1024).toFixed(1)} MB), parsing...`);
 
     const parser = new XMLParser({
       ignoreAttributes: false,
@@ -93,7 +188,7 @@ export class MetadataCache {
     };
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    log(`Metadata loaded: ${entities.size} entities, ${enums.size} enums in ${elapsed}s`);
+    log(`Schema ready: ${entities.size} entities, ${enums.size} enums (${elapsed}s)`);
   }
 
   /**
@@ -236,18 +331,52 @@ export class MetadataCache {
 
   /**
    * Get detailed entity definition
+   * Uses tiered loading for fast response times:
+   * 1. If full cache loaded, use it (has complete schema)
+   * 2. Fast path: infer schema from sample query (~2s)
+   * 3. Fallback: load full metadata (slow, may timeout)
    */
   async getEntityDefinition(entityName: string): Promise<EntityDefinition | null> {
-    await this.ensureLoaded();
-    if (!this.cache) throw new Error("Metadata not loaded");
-
-    // Check if already parsed in detail
-    if (this.cache.entityDetails.has(entityName)) {
-      return this.cache.entityDetails.get(entityName)!;
+    // If full cache is loaded, use it (has complete schema)
+    if (this.cache) {
+      return this.getEntityFromCache(entityName, this.cache);
     }
 
-    // Check if entity exists
-    const summary = this.cache.entities.get(entityName);
+    // Fast tier: check if entity exists
+    const exists = await this.entityExists(entityName);
+    if (!exists) {
+      return null;
+    }
+
+    // Fast path: infer schema from sample query (~2s)
+    const sample = await this.client.fetchEntitySample(entityName);
+    if (sample) {
+      return this.inferSchemaFromSample(entityName, sample);
+    }
+
+    // Entity exists but has no data - return minimal definition
+    // Don't fall back to slow metadata load as it may timeout
+    return {
+      name: entityName,
+      description: "(Entity exists but has no data. Cannot infer schema.)",
+      isCustom: false,
+      fields: [],
+      keys: [],
+      navigationProperties: [],
+    };
+  }
+
+  /**
+   * Get entity definition from loaded cache
+   */
+  private getEntityFromCache(entityName: string, cache: MetadataCacheEntry): EntityDefinition | null {
+    // Check if already parsed in detail
+    if (cache.entityDetails.has(entityName)) {
+      return cache.entityDetails.get(entityName)!;
+    }
+
+    // Check if entity exists in cache
+    const summary = cache.entities.get(entityName);
     if (!summary) {
       return null;
     }
@@ -255,7 +384,7 @@ export class MetadataCache {
     // Parse detailed definition from raw metadata
     const definition = this.parseEntityDefinition(entityName);
     if (definition) {
-      this.cache.entityDetails.set(entityName, definition);
+      cache.entityDetails.set(entityName, definition);
     }
 
     return definition;

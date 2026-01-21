@@ -129,6 +129,31 @@ export class D365Client {
   }
 
   /**
+   * Fetch list of available entities from OData root
+   * Much faster than $metadata for just getting entity names
+   */
+  async fetchEntityList(): Promise<string[]> {
+    log("Fetching D365 entity list...");
+    const response = await this.request<{ value: Array<{ name: string; url: string }> }>("/");
+    return response.value.map((e) => e.name);
+  }
+
+  /**
+   * Fetch a sample record to infer entity schema
+   * Much faster than full $metadata (~2s vs 30-60s)
+   */
+  async fetchEntitySample(entityName: string): Promise<Record<string, unknown> | null> {
+    try {
+      const response = await this.request<{ value: Record<string, unknown>[] }>(
+        `/${entityName}?$top=1`
+      );
+      return response.value?.[0] ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Fetch metadata EDMX document
    */
   async fetchMetadata(): Promise<string> {

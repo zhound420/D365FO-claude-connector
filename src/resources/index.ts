@@ -7,6 +7,7 @@ import type { MetadataCache } from "../metadata-cache.js";
 import { registerEntitiesResource } from "./entities.js";
 import { registerEntityTemplateResource } from "./entity.js";
 import { registerEnumsResource } from "./enums.js";
+import { registerQueriesResource } from "./queries.js";
 
 /**
  * Register all D365 resources with the MCP server
@@ -20,4 +21,7 @@ export function registerAllResources(server: McpServer, metadataCache: MetadataC
 
   // Enums resource: d365://enums
   registerEnumsResource(server, metadataCache);
+
+  // Saved queries resource: d365://queries
+  registerQueriesResource(server);
 }

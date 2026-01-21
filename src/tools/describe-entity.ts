@@ -4,6 +4,8 @@
 
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
+import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
 import type { MetadataCache } from "../metadata-cache.js";
 
 /**
@@ -16,7 +18,7 @@ export function registerDescribeEntityTool(server: McpServer, metadataCache: Met
     {
       entity: z.string().describe("The exact name of the entity to describe (e.g., 'CustomersV3', 'SalesOrderHeaders')"),
     },
-    async ({ entity }) => {
+    async ({ entity }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       try {
         const definition = await metadataCache.getEntityDefinition(entity);
 
@@ -44,9 +46,19 @@ export function registerDescribeEntityTool(server: McpServer, metadataCache: Met
         // Format the entity definition
         const sections: string[] = [];
 
+        // Check if schema is inferred vs complete
+        const isInferred = definition.description?.includes("inferred from sample");
+        const hasNoData = definition.description?.includes("has no data");
+
         // Header
         let header = `Entity: ${definition.name}`;
-        if (definition.description) {
+        if (isInferred) {
+          header += `\n\n> Schema inferred from sample data (fast mode)`;
+          header += `\n> For full schema with keys/enums, use list_entities first to load metadata`;
+        } else if (hasNoData) {
+          header += `\n\n> Entity exists but has no data. Cannot infer schema.`;
+          header += `\n> For full schema, use list_entities first to load metadata`;
+        } else if (definition.description) {
           header += `\nDescription: ${definition.description}`;
         }
         if (definition.isCustom) {
