@@ -32,6 +32,27 @@ interface AggregationResult {
 }
 
 /**
+ * Progress tracking for accurate mode
+ */
+interface AccurateModeProgress {
+  pagesFetched: number;
+  recordsProcessed: number;
+  totalCount?: number;
+  elapsedMs: number;
+}
+
+/**
+ * Streaming aggregation state for a single aggregation
+ */
+interface StreamingAggState {
+  sum: number;
+  count: number;
+  min: number;
+  max: number;
+  distinctSet?: Set<unknown>;
+}
+
+/**
  * Default max records for client-side fallback
  */
 const DEFAULT_MAX_RECORDS = 5000;
@@ -195,6 +216,292 @@ async function fetchAllRecords(
   }
 
   return allRecords.slice(0, maxRecords);
+}
+
+/**
+ * Update streaming aggregation state with a new value
+ */
+function updateStreamingState(
+  state: StreamingAggState,
+  value: unknown,
+  func: AggregationFunction
+): void {
+  if (func === "COUNTDISTINCT") {
+    if (!state.distinctSet) {
+      state.distinctSet = new Set();
+    }
+    state.distinctSet.add(value);
+    return;
+  }
+
+  if (func === "COUNT") {
+    state.count++;
+    return;
+  }
+
+  // For SUM, AVG, MIN, MAX we need numeric values
+  if (typeof value !== "number") {
+    return;
+  }
+
+  state.count++;
+  state.sum += value;
+
+  if (value < state.min) {
+    state.min = value;
+  }
+  if (value > state.max) {
+    state.max = value;
+  }
+}
+
+/**
+ * Finalize streaming state to get the final aggregation value
+ */
+function finalizeStreamingValue(
+  state: StreamingAggState,
+  func: AggregationFunction
+): number {
+  switch (func) {
+    case "COUNT":
+      return state.count;
+    case "COUNTDISTINCT":
+      return state.distinctSet?.size ?? 0;
+    case "SUM":
+      return state.sum;
+    case "AVG":
+      return state.count > 0 ? state.sum / state.count : 0;
+    case "MIN":
+      return state.count > 0 ? state.min : 0;
+    case "MAX":
+      return state.count > 0 ? state.max : 0;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Create initial streaming state
+ */
+function createStreamingState(): StreamingAggState {
+  return {
+    sum: 0,
+    count: 0,
+    min: Number.POSITIVE_INFINITY,
+    max: Number.NEGATIVE_INFINITY,
+  };
+}
+
+/**
+ * Finalize streaming results into AggregationResult format
+ */
+function finalizeStreamingResults(
+  stateMap: Map<string, Map<string, StreamingAggState>>,
+  aggregations: AggregationSpec[],
+  groupBy?: string[],
+  groupKeyMap?: Map<string, Record<string, unknown>>
+): AggregationResult[] {
+  const results: AggregationResult[] = [];
+
+  for (const [groupKeyStr, aggStates] of stateMap) {
+    const values: Record<string, number> = {};
+
+    for (const agg of aggregations) {
+      const alias = agg.alias || `${agg.function.toLowerCase()}_${agg.field === "*" ? "all" : agg.field}`;
+      const state = aggStates.get(alias);
+      if (state) {
+        values[alias] = finalizeStreamingValue(state, agg.function);
+      }
+    }
+
+    if (groupBy && groupBy.length > 0 && groupKeyMap) {
+      results.push({
+        groupKey: groupKeyMap.get(groupKeyStr),
+        values,
+      });
+    } else {
+      results.push({ values });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Format accurate mode result with progress metrics
+ */
+function formatAccurateModeResult(
+  results: AggregationResult[],
+  groupBy: string[] | undefined,
+  progress: AccurateModeProgress
+): string {
+  const lines: string[] = [];
+
+  // Header with progress info
+  if (groupBy && groupBy.length > 0) {
+    lines.push(`Aggregation Results - Accurate Mode (${results.length} groups)`);
+  } else {
+    lines.push("Aggregation Results - Accurate Mode");
+  }
+  lines.push(`Records processed: ${progress.recordsProcessed.toLocaleString()}`);
+  if (progress.totalCount !== undefined) {
+    lines.push(`Total available: ${progress.totalCount.toLocaleString()}`);
+  }
+  lines.push(`Pages fetched: ${progress.pagesFetched}`);
+  lines.push(`Time elapsed: ${(progress.elapsedMs / 1000).toFixed(1)}s`);
+  lines.push("");
+
+  // Results
+  if (groupBy && groupBy.length > 0) {
+    for (const result of results) {
+      const groupDesc = groupBy
+        .map((field) => `${field}=${result.groupKey?.[field] ?? "null"}`)
+        .join(", ");
+      lines.push(`[${groupDesc}]`);
+
+      for (const [alias, value] of Object.entries(result.values)) {
+        const formattedValue = Number.isInteger(value)
+          ? value.toLocaleString()
+          : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+        lines.push(`  ${alias}: ${formattedValue}`);
+      }
+      lines.push("");
+    }
+  } else {
+    const result = results[0];
+    if (result) {
+      for (const [alias, value] of Object.entries(result.values)) {
+        const formattedValue = Number.isInteger(value)
+          ? value.toLocaleString()
+          : value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+        lines.push(`${alias}: ${formattedValue}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * Fetch all records with streaming aggregation (accurate mode)
+ * Does not store all records in memory - aggregates as pages arrive
+ */
+async function fetchAndAggregateStreaming(
+  client: D365Client,
+  entity: string,
+  aggregations: AggregationSpec[],
+  filter?: string,
+  groupBy?: string[]
+): Promise<{ results: AggregationResult[]; progress: AccurateModeProgress }> {
+  const startTime = Date.now();
+
+  // State: Map<groupKey, Map<alias, StreamingAggState>>
+  const stateMap = new Map<string, Map<string, StreamingAggState>>();
+  const groupKeyMap = new Map<string, Record<string, unknown>>();
+
+  // Initialize for ungrouped case
+  if (!groupBy || groupBy.length === 0) {
+    const aggStates = new Map<string, StreamingAggState>();
+    for (const agg of aggregations) {
+      const alias = agg.alias || `${agg.function.toLowerCase()}_${agg.field === "*" ? "all" : agg.field}`;
+      aggStates.set(alias, createStreamingState());
+    }
+    stateMap.set("__all__", aggStates);
+  }
+
+  // Extract fields needed
+  const fieldsNeeded = new Set<string>();
+  for (const agg of aggregations) {
+    if (agg.field !== "*") {
+      fieldsNeeded.add(agg.field);
+    }
+  }
+  if (groupBy) {
+    for (const field of groupBy) {
+      fieldsNeeded.add(field);
+    }
+  }
+
+  // Build initial query - no $top for accurate mode (let D365 paginate naturally)
+  const selectFields = Array.from(fieldsNeeded).join(",");
+  let path = `/${entity}`;
+  const queryParams: string[] = [];
+  if (selectFields) {
+    queryParams.push(`$select=${encodeURIComponent(selectFields)}`);
+  }
+  if (filter) {
+    queryParams.push(`$filter=${encodeURIComponent(filter)}`);
+  }
+  if (queryParams.length > 0) {
+    path += `?${queryParams.join("&")}`;
+  }
+
+  let nextLink: string | undefined = path;
+  let pagesFetched = 0;
+  let recordsProcessed = 0;
+
+  // Fetch pages and aggregate
+  while (nextLink) {
+    const response: ODataResponse<Record<string, unknown>> = await client.request(nextLink);
+    pagesFetched++;
+
+    if (response.value && Array.isArray(response.value)) {
+      for (const record of response.value) {
+        recordsProcessed++;
+
+        // Determine group key
+        let groupKeyStr = "__all__";
+        if (groupBy && groupBy.length > 0) {
+          const keyParts = groupBy.map((field) => String(record[field] ?? "null"));
+          groupKeyStr = keyParts.join("|");
+
+          // Initialize group if new
+          if (!stateMap.has(groupKeyStr)) {
+            const aggStates = new Map<string, StreamingAggState>();
+            for (const agg of aggregations) {
+              const alias = agg.alias || `${agg.function.toLowerCase()}_${agg.field === "*" ? "all" : agg.field}`;
+              aggStates.set(alias, createStreamingState());
+            }
+            stateMap.set(groupKeyStr, aggStates);
+
+            // Store actual group key values
+            const groupKey: Record<string, unknown> = {};
+            for (const field of groupBy) {
+              groupKey[field] = record[field];
+            }
+            groupKeyMap.set(groupKeyStr, groupKey);
+          }
+        }
+
+        // Update aggregations for this record
+        const aggStates = stateMap.get(groupKeyStr)!;
+        for (const agg of aggregations) {
+          const alias = agg.alias || `${agg.function.toLowerCase()}_${agg.field === "*" ? "all" : agg.field}`;
+          const state = aggStates.get(alias)!;
+
+          if (agg.field === "*") {
+            // COUNT(*) - just increment count
+            state.count++;
+          } else {
+            updateStreamingState(state, record[agg.field], agg.function);
+          }
+        }
+      }
+    }
+
+    nextLink = response["@odata.nextLink"];
+  }
+
+  // Finalize results
+  const results = finalizeStreamingResults(stateMap, aggregations, groupBy, groupKeyMap);
+
+  const progress: AccurateModeProgress = {
+    pagesFetched,
+    recordsProcessed,
+    elapsedMs: Date.now() - startTime,
+  };
+
+  return { results, progress };
 }
 
 /**
@@ -364,10 +671,12 @@ export function registerAggregateTool(server: McpServer, client: D365Client): vo
     `Perform aggregations (SUM, AVG, COUNT, MIN, MAX, COUNTDISTINCT) on D365 entity data.
 
 Uses fast /$count endpoint for simple COUNT operations, client-side aggregation for other operations.
+Default mode caps at 5K records for quick estimates. Use accurate=true to fetch ALL records for precise totals.
 
 Examples:
 - Count all customers: entity="CustomersV3", aggregations=[{function: "COUNT", field: "*"}]
 - Sum line amounts: entity="SalesOrderLines", aggregations=[{function: "SUM", field: "LineAmount"}]
+- Accurate sum (all records): entity="SalesOrderLines", aggregations=[{function: "SUM", field: "LineAmount"}], accurate=true
 - Multiple aggregations: aggregations=[{function: "SUM", field: "LineAmount"}, {function: "AVG", field: "LineAmount"}]
 - With filter: filter="SalesOrderNumber eq 'SO-001'"
 - Group by: groupBy=["ItemNumber"] to get aggregations per item`,
@@ -385,8 +694,11 @@ Examples:
       maxRecords: z.number().optional().default(DEFAULT_MAX_RECORDS).describe(
         `Maximum records for client-side fallback (default: ${DEFAULT_MAX_RECORDS})`
       ),
+      accurate: z.boolean().optional().default(false).describe(
+        "When true, fetches ALL records for exact aggregation (no 5K limit). Shows progress metrics."
+      ),
     },
-    async ({ entity, aggregations, filter, groupBy, maxRecords }) => {
+    async ({ entity, aggregations, filter, groupBy, maxRecords, accurate }) => {
       try {
         // Check if this is a simple COUNT(*) with no groupBy
         const isSimpleCount =
@@ -396,6 +708,7 @@ Examples:
           (!groupBy || groupBy.length === 0);
 
         // Fast path: use /$count endpoint for simple COUNT operations
+        // This works regardless of accurate mode since /$count is always accurate
         if (isSimpleCount) {
           const count = await tryFastCount(client, entity, filter);
           if (count !== null) {
@@ -411,8 +724,30 @@ Examples:
           }
         }
 
+        // Accurate mode: fetch ALL records with streaming aggregation
+        if (accurate) {
+          const { results, progress } = await fetchAndAggregateStreaming(
+            client,
+            entity,
+            aggregations,
+            filter,
+            groupBy
+          );
+
+          const output = formatAccurateModeResult(results, groupBy, progress);
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: output,
+              },
+            ],
+          };
+        }
+
+        // Default mode: client-side aggregation capped at maxRecords
         // Skip $apply - D365 F&O has limited support and it causes timeouts
-        // Go directly to client-side aggregation
 
         // Extract fields needed for aggregation
         const fieldsNeeded = new Set<string>();

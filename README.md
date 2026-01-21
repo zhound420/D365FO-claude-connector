@@ -27,6 +27,7 @@ An MCP (Model Context Protocol) server that provides read access to Microsoft Dy
 | `describe_entity` | Quick schema lookup for an entity |
 | `execute_odata` | Execute raw OData paths (queries, single records, counts) |
 | `execute_code` | Run JavaScript in a secure sandbox with D365 API access |
+| `aggregate` | Perform aggregations (SUM, AVG, COUNT, MIN, MAX) on entity data |
 
 ## Installation
 
@@ -358,6 +359,35 @@ for (const c of customers) {
 return counts;
 ```
 
+#### `aggregate`
+
+Perform aggregations on D365 entity data. Uses fast `/$count` for simple COUNT operations, client-side aggregation otherwise.
+
+**Parameters:**
+- `entity` (string, required): Entity name to aggregate
+- `aggregations` (array, required): Array of aggregation specs:
+  - `function`: "SUM" | "AVG" | "COUNT" | "MIN" | "MAX" | "COUNTDISTINCT"
+  - `field`: Field to aggregate (use "*" for COUNT)
+  - `alias` (optional): Custom result name
+- `filter` (string, optional): OData $filter expression
+- `groupBy` (array, optional): Fields to group by
+- `accurate` (boolean, optional): Fetch ALL records for exact totals (default: false)
+
+**Examples:**
+```json
+// Count all customers
+{ "entity": "CustomersV3", "aggregations": [{"function": "COUNT", "field": "*"}] }
+
+// Sum with filter
+{ "entity": "SalesOrderLines", "aggregations": [{"function": "SUM", "field": "LineAmount"}], "filter": "SalesOrderNumber eq 'SO-001'" }
+
+// Accurate mode for exact totals
+{ "entity": "SalesOrderLines", "aggregations": [{"function": "SUM", "field": "LineAmount"}], "accurate": true }
+
+// Group by
+{ "entity": "SalesOrderLines", "aggregations": [{"function": "SUM", "field": "LineAmount"}], "groupBy": ["ItemNumber"] }
+```
+
 ## OData Query Syntax
 
 ### Filter Examples
@@ -448,7 +478,8 @@ src/
     ├── index.ts          # Tool registration
     ├── describe-entity.ts
     ├── execute-odata.ts
-    └── execute-code.ts
+    ├── execute-code.ts
+    └── aggregate.ts
 ```
 
 ## Security Considerations
