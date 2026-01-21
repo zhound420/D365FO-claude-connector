@@ -666,6 +666,38 @@ function formatAggregationResult(
 }
 
 /**
+ * Apply sorting and limiting to aggregation results
+ */
+function applySortingAndLimiting(
+  results: AggregationResult[],
+  orderBy?: string,
+  top?: number
+): AggregationResult[] {
+  let sortedResults = [...results];
+
+  // Apply sorting if orderBy is specified
+  if (orderBy) {
+    const parts = orderBy.trim().split(/\s+/);
+    const field = parts[0];
+    const direction = parts[1]?.toLowerCase() || "asc";
+    const desc = direction === "desc";
+
+    sortedResults.sort((a, b) => {
+      const aVal = a.values[field] ?? 0;
+      const bVal = b.values[field] ?? 0;
+      return desc ? bVal - aVal : aVal - bVal;
+    });
+  }
+
+  // Apply top limit if specified
+  if (top && top > 0) {
+    sortedResults = sortedResults.slice(0, top);
+  }
+
+  return sortedResults;
+}
+
+/**
  * Register the aggregate tool
  */
 export function registerAggregateTool(server: McpServer, client: D365Client): void {
@@ -676,13 +708,16 @@ export function registerAggregateTool(server: McpServer, client: D365Client): vo
 Uses fast /$count endpoint for simple COUNT operations, client-side aggregation for other operations.
 Default mode caps at 5K records for quick estimates. Use accurate=true to fetch ALL records for precise totals.
 
+Supports orderBy and top parameters for ranked results (e.g., "top 20 customers by sales").
+
 Examples:
 - Count all customers: entity="CustomersV3", aggregations=[{function: "COUNT", field: "*"}]
 - Sum line amounts: entity="SalesOrderLines", aggregations=[{function: "SUM", field: "LineAmount"}]
 - Accurate sum (all records): entity="SalesOrderLines", aggregations=[{function: "SUM", field: "LineAmount"}], accurate=true
 - Multiple aggregations: aggregations=[{function: "SUM", field: "LineAmount"}, {function: "AVG", field: "LineAmount"}]
 - With filter: filter="SalesOrderNumber eq 'SO-001'"
-- Group by: groupBy=["ItemNumber"] to get aggregations per item`,
+- Group by: groupBy=["ItemNumber"] to get aggregations per item
+- Top customers: groupBy=["CustomerAccount"], orderBy="sum_Amount desc", top=20`,
     {
       entity: z.string().describe("Entity name to aggregate (e.g., 'SalesOrderLines')"),
       aggregations: z.array(
@@ -700,8 +735,14 @@ Examples:
       accurate: z.boolean().optional().default(false).describe(
         "When true, fetches ALL records for exact aggregation (no 5K limit). Shows progress metrics."
       ),
+      orderBy: z.string().optional().describe(
+        "Sort results by aggregation alias, e.g. 'sum_LineAmount desc' or 'total_sales asc'"
+      ),
+      top: z.number().optional().describe(
+        "Return only top N results after sorting (useful for 'top customers' queries)"
+      ),
     },
-    async ({ entity, aggregations, filter, groupBy, maxRecords, accurate }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ entity, aggregations, filter, groupBy, maxRecords, accurate, orderBy, top }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       try {
         const startTime = Date.now();
 
@@ -740,7 +781,10 @@ Examples:
             groupBy
           );
 
-          const output = formatAccurateModeResult(results, groupBy, progress);
+          // Apply sorting and limiting
+          const sortedResults = applySortingAndLimiting(results, orderBy, top);
+
+          const output = formatAccurateModeResult(sortedResults, groupBy, progress);
 
           return {
             content: [
@@ -778,7 +822,10 @@ Examples:
 
         const results = performClientSideAggregation(records, aggregations, groupBy);
 
-        const output = formatAggregationResult(results, groupBy, "client", records.length);
+        // Apply sorting and limiting
+        const sortedResults = applySortingAndLimiting(results, orderBy, top);
+
+        const output = formatAggregationResult(sortedResults, groupBy, "client", records.length);
 
         return {
           content: [

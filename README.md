@@ -36,6 +36,10 @@ An MCP (Model Context Protocol) server that provides read access to Microsoft Dy
 | `save_query` | Save reusable query templates with parameter support |
 | `execute_saved_query` | Execute saved query templates with parameter substitution |
 | `delete_saved_query` | Delete saved query templates |
+| `join_entities` | Cross-entity joins using $expand or client-side join |
+| `batch_query` | Execute multiple queries in parallel |
+| `search_entity` | Robust entity search with automatic fallback strategies |
+| `analyze_customer` | Comprehensive single-call customer analysis |
 
 ## Installation
 
@@ -554,6 +558,127 @@ Delete a saved query template.
 **Parameters:**
 - `name` (string, required): Name of the query to delete
 
+#### `join_entities`
+
+Cross-entity joins using OData $expand or client-side join.
+
+**Parameters:**
+- `primaryEntity` (string, required): Primary entity name
+- `primaryKey` (string, required): Primary key field to join on
+- `secondaryEntity` (string, required): Secondary entity name
+- `secondaryKey` (string, required): Secondary key field to join on
+- `primarySelect` (string[], optional): Fields from primary entity
+- `secondarySelect` (string[], optional): Fields from secondary entity
+- `primaryFilter` (string, optional): Filter for primary entity
+- `joinType` ("inner" | "left", optional): Join type (default: "inner")
+- `maxRecords` (number, optional): Maximum records (default: 5000)
+
+**Examples:**
+```json
+// Join orders with customers
+{ "primaryEntity": "SalesOrderHeadersV2", "primaryKey": "OrderingCustomerAccountNumber", "secondaryEntity": "CustomersV3", "secondaryKey": "CustomerAccount", "primarySelect": ["SalesOrderNumber", "OrderCreatedDateTime"], "secondarySelect": ["CustomerName", "CustomerGroup"] }
+```
+
+#### `batch_query`
+
+Execute multiple D365 OData queries in parallel, returning all results in a single response.
+
+**Parameters:**
+- `queries` (array, required): Array of query specs (1-10 queries):
+  - `name` (string, optional): Label for this query result
+  - `entity` (string, required): Entity name
+  - `filter` (string, optional): OData $filter expression
+  - `select` (string[], optional): Fields to include
+  - `top` (number, optional): Limit records (default: 100)
+  - `orderby` (string, optional): OData $orderby expression
+  - `fetchAll` (boolean, optional): Auto-paginate all pages
+  - `maxRecords` (number, optional): Max records when fetchAll=true
+- `stopOnError` (boolean, optional): Stop on first failure (default: false)
+
+**Examples:**
+```json
+// Multiple parallel queries
+{
+  "queries": [
+    { "name": "recent_orders", "entity": "SalesOrderHeadersV2", "top": 10, "orderby": "CreatedDateTime desc" },
+    { "name": "customers", "entity": "CustomersV3", "filter": "CustomerGroup eq 'US'", "select": ["CustomerAccount", "CustomerName"] },
+    { "name": "all_invoices", "entity": "SalesInvoiceHeadersV2", "fetchAll": true, "maxRecords": 1000 }
+  ]
+}
+```
+
+#### `search_entity`
+
+Robust entity search with automatic fallback strategies. Handles special characters (like `&` in company names) that cause issues with standard OData `contains()`.
+
+**Search Strategies (tried in order):**
+1. `contains()` - Standard OData text search (fastest)
+2. `startswith()` - Prefix matching (more reliable on D365)
+3. `exact` - Exact field match
+4. `client_filter` - Fetch + client-side filter (always works)
+
+**Parameters:**
+- `entity` (string, required): Entity to search
+- `searchTerm` (string, required): Text to search for
+- `searchField` (string, required): Field to search in
+- `select` (string[], optional): Fields to return in results
+- `top` (number, optional): Maximum results (default: 10)
+
+**Examples:**
+```json
+// Search customers with special characters
+{ "entity": "CustomersV3", "searchTerm": "S&S", "searchField": "CustomerName" }
+
+// Search with specific fields
+{ "entity": "CustomersV3", "searchTerm": "Contoso", "searchField": "CustomerName", "select": ["CustomerAccount", "CustomerName", "CustomerGroup"], "top": 5 }
+
+// Search vendors
+{ "entity": "VendorsV3", "searchTerm": "Microsoft", "searchField": "VendorName" }
+```
+
+#### `analyze_customer`
+
+Comprehensive customer analysis in a single call. Runs parallel queries to gather profile, orders, spend, and trending data.
+
+**Features:**
+- Customer profile lookup (with fallback search strategies)
+- Order statistics (count, total spend, average order value)
+- Order date range (first and last order)
+- Recent orders list
+- Monthly order trending
+
+Uses efficient aggregation at the line level (`SalesOrderLinesV2`) for accurate spend calculation, avoiding the $0 header total issue.
+
+**Parameters:**
+- `customerAccount` (string, optional): Customer account number
+- `customerName` (string, optional): Customer name to search (handles special characters)
+- `includeOrders` (boolean, optional): Include recent orders list (default: true)
+- `includeSpend` (boolean, optional): Include total spend calculation (default: true)
+- `includeTrending` (boolean, optional): Include monthly trend analysis (default: true)
+- `recentOrdersLimit` (number, optional): Number of recent orders to show (default: 10)
+- `trendPeriods` (number, optional): Number of months for trend (default: 12)
+
+**Examples:**
+```json
+// Analyze by account number
+{ "customerAccount": "SS0011" }
+
+// Analyze by name (handles special characters like &)
+{ "customerName": "S&S" }
+
+// Quick analysis without trending (faster)
+{ "customerAccount": "US-001", "includeTrending": false }
+
+// Full analysis with custom periods
+{ "customerName": "Contoso", "recentOrdersLimit": 20, "trendPeriods": 24 }
+```
+
+**Output includes:**
+- Customer profile (name, account, group, address)
+- Summary statistics (total orders, total spend, average order value, first/last order dates)
+- Recent orders list
+- Monthly order trend table with order counts and revenue
+
 #### `d365://queries`
 
 Resource that lists all saved query templates.
@@ -663,7 +788,11 @@ src/
     ├── export.ts         # CSV/JSON/TSV export
     ├── compare-periods.ts # Period comparisons
     ├── trending.ts       # Time series analysis
-    └── saved-queries.ts  # Query templates
+    ├── saved-queries.ts  # Query templates
+    ├── join-entities.ts  # Cross-entity joins
+    ├── batch-query.ts    # Parallel query execution
+    ├── search-entity.ts  # Robust entity search
+    └── analyze-customer.ts # Customer analysis
 ```
 
 ## Security Considerations

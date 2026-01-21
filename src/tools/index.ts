@@ -15,6 +15,8 @@ import { registerTrendingTool } from "./trending.js";
 import { registerSavedQueryTools } from "./saved-queries.js";
 import { registerJoinEntitiesTool } from "./join-entities.js";
 import { registerBatchQueryTool } from "./batch-query.js";
+import { registerSearchEntityTool } from "./search-entity.js";
+import { registerAnalyzeCustomerTool } from "./analyze-customer.js";
 
 /**
  * Register all D365 tools with the MCP server
@@ -32,6 +34,8 @@ import { registerBatchQueryTool } from "./batch-query.js";
  * - delete_saved_query: Delete saved query templates
  * - join_entities: Cross-entity joins using $expand or client-side join
  * - batch_query: Execute multiple queries in parallel
+ * - search_entity: Robust entity search with automatic fallback strategies
+ * - analyze_customer: Comprehensive single-call customer analysis
  */
 export function registerAllTools(
   server: McpServer,
@@ -67,4 +71,10 @@ export function registerAllTools(
 
   // batch_query tool: Execute multiple queries in parallel
   registerBatchQueryTool(server, client);
+
+  // search_entity tool: Robust entity search with fallback strategies
+  registerSearchEntityTool(server, client);
+
+  // analyze_customer tool: Comprehensive single-call customer analysis
+  registerAnalyzeCustomerTool(server, client);
 }

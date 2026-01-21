@@ -238,6 +238,22 @@ Auto-pagination:
           message = error.message;
           if (error.statusCode === 404) {
             message = `Resource not found at path: ${path}. Verify the entity name and key values are correct.`;
+          } else if (error.statusCode === 400) {
+            // Add helpful tips for common OData filter issues
+            const pathLower = path.toLowerCase();
+            if (pathLower.includes("contains(") || pathLower.includes("contains%28")) {
+              message += "\n\nTip: The contains() function can fail with special characters (like &, ', etc.).\n";
+              message += "Try these alternatives:\n";
+              message += "- Use startswith() instead of contains()\n";
+              message += "- Search by account/ID field instead of name\n";
+              message += "- Use the search_entity tool for automatic fallback strategies";
+            } else if (pathLower.includes("$apply") || pathLower.includes("%24apply")) {
+              message += "\n\nTip: D365 F&O has limited $apply support and may timeout on large datasets.\n";
+              message += "Try these alternatives:\n";
+              message += "- Use the aggregate tool with accurate=true for large datasets\n";
+              message += "- Add a more restrictive $filter to reduce the data volume\n";
+              message += "- Use batch_query to parallelize multiple smaller queries";
+            }
           }
         } else {
           message = `Error executing OData request: ${error instanceof Error ? error.message : String(error)}`;
