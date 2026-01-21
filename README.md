@@ -72,6 +72,7 @@ Optional:
 | `D365_TRANSPORT` | `stdio` | Transport mode (`stdio` or `http`) |
 | `D365_HTTP_PORT` | `3000` | HTTP port (when using http transport) |
 | `D365_LOG_LEVEL` | `info` | Logging level |
+| `D365_PAGINATION_TIMEOUT_MS` | `60000` | Timeout (ms) for paginated requests on large datasets |
 
 ### Azure AD App Registration
 
@@ -378,12 +379,26 @@ Perform aggregations on D365 entity data. Uses fast `/$count` for simple COUNT o
 **Parameters:**
 - `entity` (string, required): Entity name to aggregate
 - `aggregations` (array, required): Array of aggregation specs:
-  - `function`: "SUM" | "AVG" | "COUNT" | "MIN" | "MAX" | "COUNTDISTINCT"
+  - `function`: "SUM" | "AVG" | "COUNT" | "MIN" | "MAX" | "COUNTDISTINCT" | "P50" | "P90" | "P95" | "P99"
   - `field`: Field to aggregate (use "*" for COUNT)
   - `alias` (optional): Custom result name
 - `filter` (string, optional): OData $filter expression
 - `groupBy` (array, optional): Fields to group by
 - `accurate` (boolean, optional): Fetch ALL records for exact totals (default: false)
+- `sampling` (boolean, optional): Use statistical sampling for fast estimates on very large datasets (default: false)
+- `orderBy` (string, optional): Sort results by aggregation alias (e.g., "sum_LineAmount desc")
+- `top` (number, optional): Return only top N results after sorting
+
+**Percentile functions:**
+- `P50` - Median (50th percentile)
+- `P90` - 90th percentile
+- `P95` - 95th percentile
+- `P99` - 99th percentile
+
+**Performance notes:**
+- Default mode caps at 5K records for quick estimates
+- `accurate=true` fetches ALL records with 60s timeout per page and automatic retry (2 retries with exponential backoff)
+- `sampling=true` uses ~10K record sample for statistical estimates on very large datasets (100K+ records)
 
 **Examples:**
 ```json
@@ -398,6 +413,15 @@ Perform aggregations on D365 entity data. Uses fast `/$count` for simple COUNT o
 
 // Group by
 { "entity": "SalesOrderLines", "aggregations": [{"function": "SUM", "field": "LineAmount"}], "groupBy": ["ItemNumber"] }
+
+// Median order value (requires accurate=true for percentiles)
+{ "entity": "SalesOrderLines", "aggregations": [{"function": "P50", "field": "LineAmount"}], "accurate": true }
+
+// Fast estimate on very large dataset (100K+ records)
+{ "entity": "BatchJobs", "aggregations": [{"function": "COUNT", "field": "*"}], "sampling": true }
+
+// Top 20 customers by spend
+{ "entity": "SalesOrderLines", "aggregations": [{"function": "SUM", "field": "LineAmount"}], "groupBy": ["CustomerAccount"], "orderBy": "sum_LineAmount desc", "top": 20 }
 ```
 
 #### `get_related`
@@ -821,6 +845,12 @@ src/
 - Reduce query scope with `$top` and `$filter`
 - For large datasets, use pagination with `$skip`
 - In sandbox code, break up operations into smaller batches
+
+**Large dataset aggregation improvements:**
+- Pagination requests now use 60s timeout with automatic retry (2 retries with exponential backoff)
+- Configure timeout via `D365_PAGINATION_TIMEOUT_MS` environment variable
+- For very large datasets (100K+ records), use `sampling=true` on the `aggregate` tool for fast statistical estimates
+- `accurate=true` mode now reports partial results if interrupted mid-pagination
 
 ## License
 
