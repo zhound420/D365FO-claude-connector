@@ -45,7 +45,7 @@ An MCP (Model Context Protocol) server that provides read access to Microsoft Dy
 
 ```bash
 # Clone the repository
-git clone <repository-url>
+git clone https://github.com/zhound420/D365FO-claude-connector.git
 cd d365fo-mcp-server
 
 # Install dependencies
