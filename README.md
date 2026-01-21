@@ -68,9 +68,14 @@ Optional:
 4. Create a client secret
 5. Note the tenant ID, client ID, and secret
 
-## Usage with Claude Code
+## Setup
 
-Add to your Claude Code MCP configuration (`~/.claude/claude_desktop_config.json`):
+### Claude Desktop
+
+Add to your Claude Desktop config file:
+
+**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
 
 ```json
 {
@@ -88,6 +93,122 @@ Add to your Claude Code MCP configuration (`~/.claude/claude_desktop_config.json
   }
 }
 ```
+
+### Claude Code (CLI)
+
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "d365": {
+      "command": "node",
+      "args": ["/path/to/d365fo-mcp-server/dist/index.js"],
+      "env": {
+        "D365_TENANT_ID": "your-tenant-id",
+        "D365_CLIENT_ID": "your-client-id",
+        "D365_CLIENT_SECRET": "your-client-secret",
+        "D365_ENVIRONMENT_URL": "https://your-env.operations.dynamics.com"
+      }
+    }
+  }
+}
+```
+
+After adding the configuration, restart Claude Desktop or Claude Code.
+
+## Talking to Claude - Example Prompts
+
+Once configured, you can ask Claude natural language questions about your D365 environment. Here are some examples:
+
+### Discovering Entities
+
+> **You:** What customer-related entities are available in D365?
+
+Claude will use the `d365://entities?filter=*Cust*` resource to find matching entities.
+
+> **You:** Show me the schema for the CustomersV3 entity
+
+Claude will use `describe_entity` or the `d365://entity/CustomersV3` resource.
+
+### Querying Data
+
+> **You:** Get me the first 10 customers with their account numbers and names
+
+Claude will use `execute_odata` with path `CustomersV3?$top=10&$select=CustomerAccount,CustomerName`
+
+> **You:** How many sales orders are in the system?
+
+Claude will use `execute_odata` with path `SalesOrderHeaders/$count`
+
+> **You:** Find all customers in customer group "US" with credit limit over 50000
+
+Claude will construct an OData filter query automatically.
+
+### Complex Analysis
+
+> **You:** Analyze the distribution of customers across different customer groups
+
+Claude will use `execute_code` to run:
+```javascript
+const customers = await d365.query('CustomersV3', { $select: 'CustomerGroup' });
+const distribution = {};
+for (const c of customers) {
+  distribution[c.CustomerGroup] = (distribution[c.CustomerGroup] || 0) + 1;
+}
+return distribution;
+```
+
+> **You:** Get me all open sales orders with their line items for customer US-001
+
+Claude will use `execute_odata` with expansion:
+```
+SalesOrderHeaders?$filter=CustomerAccount eq 'US-001' and SalesOrderStatus eq Microsoft.Dynamics.DataEntities.SalesOrderStatus'Open'&$expand=SalesOrderLines
+```
+
+### Understanding Enums
+
+> **You:** What are the possible values for sales order status?
+
+Claude will check the `d365://enums` resource or use `execute_code` with `d365.getEnum('SalesOrderStatus')`.
+
+### Multi-Step Analysis
+
+> **You:** Compare the average credit limits between US and EU customer groups
+
+Claude will write and execute sandbox code:
+```javascript
+const customers = await d365.query('CustomersV3', {
+  $filter: "CustomerGroup eq 'US' or CustomerGroup eq 'EU'",
+  $select: 'CustomerGroup,CreditLimit'
+});
+
+const groups = { US: [], EU: [] };
+for (const c of customers) {
+  if (groups[c.CustomerGroup]) {
+    groups[c.CustomerGroup].push(c.CreditLimit || 0);
+  }
+}
+
+const avg = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+
+return {
+  US: { count: groups.US.length, avgCreditLimit: avg(groups.US) },
+  EU: { count: groups.EU.length, avgCreditLimit: avg(groups.EU) }
+};
+```
+
+## Tips for Best Results
+
+1. **Be specific about entities** - D365 has many similarly named entities (e.g., `Customers`, `CustomersV3`, `CustCustomerV3`). Ask Claude to list available entities if unsure.
+
+2. **Mention field names** - If you know the field names, include them: "Get CustomerAccount and CustomerName from CustomersV3"
+
+3. **Use natural date formats** - "Orders from last month" or "Orders after January 1, 2024"
+
+4. **Ask for counts first** - Before fetching large datasets, ask "How many records are in X?" to understand the data volume.
+
+5. **Request explanations** - Ask Claude to explain what query it's running: "Show me customers in group US and explain the OData query you're using"
 
 ## API Reference
 
