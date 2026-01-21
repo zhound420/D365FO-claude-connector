@@ -15,7 +15,7 @@ import { formatTiming } from "../progress.js";
 /**
  * Supported aggregation functions
  */
-type AggregationFunction = "SUM" | "AVG" | "COUNT" | "MIN" | "MAX" | "COUNTDISTINCT";
+type AggregationFunction = "SUM" | "AVG" | "COUNT" | "MIN" | "MAX" | "COUNTDISTINCT" | "P50" | "P90" | "P95" | "P99";
 
 /**
  * Single aggregation specification
@@ -53,6 +53,7 @@ interface StreamingAggState {
   min: number;
   max: number;
   distinctSet?: Set<unknown>;
+  values?: number[]; // For percentile calculations
 }
 
 /**
@@ -222,6 +223,33 @@ async function fetchAllRecords(
 }
 
 /**
+ * Check if a function requires storing all values (for percentiles)
+ */
+function isPercentileFunction(func: AggregationFunction): boolean {
+  return func === "P50" || func === "P90" || func === "P95" || func === "P99";
+}
+
+/**
+ * Calculate percentile from sorted array
+ */
+function calculatePercentile(sortedValues: number[], percentile: number): number {
+  if (sortedValues.length === 0) return 0;
+  if (sortedValues.length === 1) return sortedValues[0];
+
+  const index = (percentile / 100) * (sortedValues.length - 1);
+  const lower = Math.floor(index);
+  const upper = Math.ceil(index);
+
+  if (lower === upper) {
+    return sortedValues[lower];
+  }
+
+  // Linear interpolation
+  const fraction = index - lower;
+  return sortedValues[lower] + fraction * (sortedValues[upper] - sortedValues[lower]);
+}
+
+/**
  * Update streaming aggregation state with a new value
  */
 function updateStreamingState(
@@ -242,7 +270,7 @@ function updateStreamingState(
     return;
   }
 
-  // For SUM, AVG, MIN, MAX we need numeric values
+  // For SUM, AVG, MIN, MAX, and percentiles we need numeric values
   if (typeof value !== "number") {
     return;
   }
@@ -255,6 +283,14 @@ function updateStreamingState(
   }
   if (value > state.max) {
     state.max = value;
+  }
+
+  // Store values for percentile calculations
+  if (isPercentileFunction(func)) {
+    if (!state.values) {
+      state.values = [];
+    }
+    state.values.push(value);
   }
 }
 
@@ -278,6 +314,22 @@ function finalizeStreamingValue(
       return state.count > 0 ? state.min : 0;
     case "MAX":
       return state.count > 0 ? state.max : 0;
+    case "P50":
+      if (!state.values || state.values.length === 0) return 0;
+      state.values.sort((a, b) => a - b);
+      return calculatePercentile(state.values, 50);
+    case "P90":
+      if (!state.values || state.values.length === 0) return 0;
+      state.values.sort((a, b) => a - b);
+      return calculatePercentile(state.values, 90);
+    case "P95":
+      if (!state.values || state.values.length === 0) return 0;
+      state.values.sort((a, b) => a - b);
+      return calculatePercentile(state.values, 95);
+    case "P99":
+      if (!state.values || state.values.length === 0) return 0;
+      state.values.sort((a, b) => a - b);
+      return calculatePercentile(state.values, 99);
     default:
       return 0;
   }
@@ -453,10 +505,11 @@ async function fetchAndAggregateStreaming(
         recordsProcessed++;
 
         // Determine group key
+        // Use JSON.stringify to avoid collisions when values contain delimiter characters
         let groupKeyStr = "__all__";
         if (groupBy && groupBy.length > 0) {
-          const keyParts = groupBy.map((field) => String(record[field] ?? "null"));
-          groupKeyStr = keyParts.join("|");
+          const keyParts = groupBy.map((field) => record[field] ?? null);
+          groupKeyStr = JSON.stringify(keyParts);
 
           // Initialize group if new
           if (!stateMap.has(groupKeyStr)) {
@@ -531,6 +584,22 @@ function calculateAggregation(
       return Math.max(...values);
     case "COUNTDISTINCT":
       return new Set(values).size;
+    case "P50": {
+      const sorted = [...values].sort((a, b) => a - b);
+      return calculatePercentile(sorted, 50);
+    }
+    case "P90": {
+      const sorted = [...values].sort((a, b) => a - b);
+      return calculatePercentile(sorted, 90);
+    }
+    case "P95": {
+      const sorted = [...values].sort((a, b) => a - b);
+      return calculatePercentile(sorted, 95);
+    }
+    case "P99": {
+      const sorted = [...values].sort((a, b) => a - b);
+      return calculatePercentile(sorted, 99);
+    }
     default:
       return 0;
   }
@@ -549,8 +618,9 @@ function performClientSideAggregation(
     const groups = new Map<string, Record<string, unknown>[]>();
 
     for (const record of records) {
-      const keyParts = groupBy.map((field) => String(record[field] ?? "null"));
-      const key = keyParts.join("|");
+      // Use JSON.stringify to avoid collisions when values contain delimiter characters
+      const keyParts = groupBy.map((field) => record[field] ?? null);
+      const key = JSON.stringify(keyParts);
 
       if (!groups.has(key)) {
         groups.set(key, []);
@@ -560,11 +630,11 @@ function performClientSideAggregation(
 
     const results: AggregationResult[] = [];
 
-    for (const [key, groupRecords] of groups) {
+    for (const [, groupRecords] of groups) {
       const groupKey: Record<string, unknown> = {};
-      const keyParts = key.split("|");
-      groupBy.forEach((field, index) => {
-        groupKey[field] = groupRecords[0]?.[field] ?? keyParts[index];
+      // Get actual values from the first record in the group
+      groupBy.forEach((field) => {
+        groupKey[field] = groupRecords[0]?.[field];
       });
 
       const values: Record<string, number> = {};
@@ -703,16 +773,19 @@ function applySortingAndLimiting(
 export function registerAggregateTool(server: McpServer, client: D365Client): void {
   server.tool(
     "aggregate",
-    `Perform aggregations (SUM, AVG, COUNT, MIN, MAX, COUNTDISTINCT) on D365 entity data.
+    `Perform aggregations (SUM, AVG, COUNT, MIN, MAX, COUNTDISTINCT, P50, P90, P95, P99) on D365 entity data.
 
 Uses fast /$count endpoint for simple COUNT operations, client-side aggregation for other operations.
 Default mode caps at 5K records for quick estimates. Use accurate=true to fetch ALL records for precise totals.
 
 Supports orderBy and top parameters for ranked results (e.g., "top 20 customers by sales").
+Percentiles: P50 (median), P90, P95, P99 are useful for understanding value distributions.
 
 Examples:
 - Count all customers: entity="CustomersV3", aggregations=[{function: "COUNT", field: "*"}]
 - Sum line amounts: entity="SalesOrderLines", aggregations=[{function: "SUM", field: "LineAmount"}]
+- Median order value: entity="SalesOrderLines", aggregations=[{function: "P50", field: "LineAmount"}], accurate=true
+- P90 order value: entity="SalesOrderLines", aggregations=[{function: "P90", field: "LineAmount"}], accurate=true
 - Accurate sum (all records): entity="SalesOrderLines", aggregations=[{function: "SUM", field: "LineAmount"}], accurate=true
 - Multiple aggregations: aggregations=[{function: "SUM", field: "LineAmount"}, {function: "AVG", field: "LineAmount"}]
 - With filter: filter="SalesOrderNumber eq 'SO-001'"
@@ -722,7 +795,7 @@ Examples:
       entity: z.string().describe("Entity name to aggregate (e.g., 'SalesOrderLines')"),
       aggregations: z.array(
         z.object({
-          function: z.enum(["SUM", "AVG", "COUNT", "MIN", "MAX", "COUNTDISTINCT"]).describe("Aggregation function"),
+          function: z.enum(["SUM", "AVG", "COUNT", "MIN", "MAX", "COUNTDISTINCT", "P50", "P90", "P95", "P99"]).describe("Aggregation function (P50=median, P90/P95/P99=percentiles)"),
           field: z.string().describe("Field to aggregate (use '*' for COUNT)"),
           alias: z.string().optional().describe("Optional result alias"),
         })

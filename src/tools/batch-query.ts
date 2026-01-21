@@ -13,9 +13,10 @@ import { ProgressReporter } from "../progress.js";
 /**
  * Limits for batch queries
  */
-const MAX_QUERIES = 10;
+const MAX_QUERIES = parseInt(process.env.D365_MAX_BATCH_QUERIES || "10", 10);
 const DEFAULT_TOP = 100;
 const DEFAULT_MAX_RECORDS = 5000;
+const MAX_CONCURRENT_REQUESTS = parseInt(process.env.D365_BATCH_CONCURRENCY || "5", 10);
 
 /**
  * Schema for a single query in the batch
@@ -195,6 +196,46 @@ async function executeQuery(
 }
 
 /**
+ * Execute tasks with concurrency limit
+ */
+async function executeWithConcurrencyLimit<T>(
+  tasks: (() => Promise<T>)[],
+  limit: number
+): Promise<T[]> {
+  const results: T[] = [];
+  const executing: Promise<void>[] = [];
+
+  for (let i = 0; i < tasks.length; i++) {
+    const task = tasks[i];
+    const p = task().then((result) => {
+      results[i] = result;
+    });
+
+    executing.push(p);
+
+    if (executing.length >= limit) {
+      await Promise.race(executing);
+      // Remove completed promises
+      for (let j = executing.length - 1; j >= 0; j--) {
+        if (executing[j] !== undefined) {
+          // Check if promise is settled by racing with immediate resolve
+          const settled = await Promise.race([
+            executing[j].then(() => true, () => true),
+            Promise.resolve(false),
+          ]);
+          if (settled) {
+            executing.splice(j, 1);
+          }
+        }
+      }
+    }
+  }
+
+  await Promise.all(executing);
+  return results;
+}
+
+/**
  * Resolve name collisions by adding numeric suffixes
  */
 function resolveNameCollisions(queries: BatchQueryItem[]): BatchQueryItem[] {
@@ -251,23 +292,11 @@ async function executeBatchQueries(
     return results;
   }
 
-  // Parallel execution with Promise.allSettled
-  const results = await Promise.allSettled(
-    resolvedQueries.map(q => executeQuery(client, q, progress))
-  );
+  // Parallel execution with concurrency limit
+  const tasks = resolvedQueries.map(q => () => executeQuery(client, q, progress));
+  const results = await executeWithConcurrencyLimit(tasks, MAX_CONCURRENT_REQUESTS);
 
-  return results.map((r, i) => {
-    if (r.status === "fulfilled") {
-      return r.value;
-    }
-    return {
-      name: resolvedQueries[i].name || resolvedQueries[i].entity,
-      entity: resolvedQueries[i].entity,
-      success: false,
-      error: String(r.reason),
-      elapsedMs: 0,
-    };
-  });
+  return results;
 }
 
 /**

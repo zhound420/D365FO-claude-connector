@@ -48,6 +48,8 @@ interface TrendDataPoint {
   value: number;
   growthRate: number | null;
   movingAverage: number | null;
+  priorYearValue?: number | null;
+  yoyChange?: number | null;
 }
 
 /**
@@ -167,7 +169,8 @@ function formatTrendingResults(
   aggregation: AggregationFunction,
   granularity: Granularity,
   hasMovingAverage: boolean,
-  movingAverageWindow?: number
+  movingAverageWindow?: number,
+  hasYoY?: boolean
 ): string {
   const lines: string[] = [];
 
@@ -175,6 +178,9 @@ function formatTrendingResults(
   lines.push(`Metric: ${aggregation}(${valueField}) by ${granularity}`);
   if (hasMovingAverage && movingAverageWindow) {
     lines.push(`Moving Average: ${movingAverageWindow}-period`);
+  }
+  if (hasYoY) {
+    lines.push("Year-over-Year Comparison: Enabled");
   }
   lines.push("");
 
@@ -185,6 +191,10 @@ function formatTrendingResults(
   }
   if (hasMovingAverage) {
     headers.push(`MA(${movingAverageWindow})`);
+  }
+  if (hasYoY) {
+    headers.push("Prior Year");
+    headers.push("YoY %");
   }
 
   lines.push(headers.join("\t"));
@@ -222,6 +232,25 @@ function formatTrendingResults(
       }
     }
 
+    // YoY comparison
+    if (hasYoY) {
+      if (dp.priorYearValue === null || dp.priorYearValue === undefined) {
+        row.push("-");
+      } else {
+        const formattedPrior = Number.isInteger(dp.priorYearValue)
+          ? dp.priorYearValue.toLocaleString()
+          : dp.priorYearValue.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        row.push(formattedPrior);
+      }
+
+      if (dp.yoyChange === null || dp.yoyChange === undefined) {
+        row.push("-");
+      } else {
+        const sign = dp.yoyChange >= 0 ? "+" : "";
+        row.push(`${sign}${dp.yoyChange.toFixed(1)}%`);
+      }
+    }
+
     lines.push(row.join("\t"));
   }
 
@@ -247,6 +276,16 @@ function formatTrendingResults(
     lines.push(`  Overall Growth: ${sign}${overallGrowth.toFixed(1)}%`);
   }
 
+  // Overall YoY change if applicable
+  if (hasYoY) {
+    const priorYearTotal = dataPoints.reduce((sum, dp) => sum + (dp.priorYearValue || 0), 0);
+    if (priorYearTotal > 0) {
+      const overallYoY = ((totalSum - priorYearTotal) / priorYearTotal) * 100;
+      const sign = overallYoY >= 0 ? "+" : "";
+      lines.push(`  Overall YoY Change: ${sign}${overallYoY.toFixed(1)}%`);
+    }
+  }
+
   return lines.join("\n");
 }
 
@@ -256,7 +295,7 @@ function formatTrendingResults(
 export function registerTrendingTool(server: McpServer, client: D365Client): void {
   server.tool(
     "trending",
-    `Time series analysis with aggregation, growth rates, and moving averages.
+    `Time series analysis with aggregation, growth rates, moving averages, and year-over-year comparison.
 
 Buckets data by time granularity and calculates trends over multiple periods.
 Useful for identifying patterns, seasonality, and performance trends.
@@ -265,6 +304,7 @@ Examples:
 - Monthly revenue trend: entity="SalesOrderLines", dateField="CreatedDateTime", valueField="LineAmount", granularity="month", periods=12
 - Weekly order count: entity="SalesOrderHeaders", dateField="OrderDate", valueField="*", aggregation="COUNT", granularity="week"
 - Quarterly with moving average: granularity="quarter", movingAverageWindow=4
+- Year-over-year comparison: granularity="month", periods=12, compareYoY=true
 - Daily with filter: filter="ItemGroup eq 'Electronics'", granularity="day", periods=30`,
     {
       entity: z.string().describe("Entity to analyze (e.g., 'SalesOrderLines')"),
@@ -291,8 +331,11 @@ Examples:
       includeGrowthRate: z.boolean().optional().default(true).describe(
         "Include period-over-period growth rate (default: true)"
       ),
+      compareYoY: z.boolean().optional().default(false).describe(
+        "Include year-over-year comparison (compares each period to same period last year)"
+      ),
     },
-    async ({ entity, dateField, valueField, aggregation, granularity, periods, endDate, filter, movingAverageWindow, includeGrowthRate }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ entity, dateField, valueField, aggregation, granularity, periods, endDate, filter, movingAverageWindow, includeGrowthRate, compareYoY }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       try {
         const startTime = Date.now();
         const aggFunc = aggregation as AggregationFunction;
@@ -398,12 +441,92 @@ Examples:
           ? calculateMovingAverages(orderedValues, movingAverageWindow)
           : orderedValues.map(() => null);
 
+        // Calculate YoY comparison if requested
+        let priorYearValues: (number | null)[] = orderedValues.map(() => null);
+        let yoyChanges: (number | null)[] = orderedValues.map(() => null);
+
+        if (compareYoY) {
+          // Generate prior year period starts
+          const priorYearEnd = addYears(end, -1);
+          const priorYearPeriodStarts = generatePeriodStarts(priorYearEnd, gran, periods);
+
+          // Calculate prior year date range
+          if (priorYearPeriodStarts.length > 0) {
+            const priorYearOverallStart = priorYearPeriodStarts[0];
+            const priorYearOverallEnd = getPeriodEnd(priorYearPeriodStarts[priorYearPeriodStarts.length - 1], gran);
+
+            // Build prior year filter
+            const priorYearDateFilter = buildDateFilter(dateField, priorYearOverallStart, priorYearOverallEnd);
+            const priorYearCombinedFilter = filter
+              ? `(${priorYearDateFilter}) and (${filter})`
+              : priorYearDateFilter;
+
+            // Initialize prior year buckets
+            const priorYearBuckets = new Map<string, StreamingAggState>();
+            for (const periodStart of priorYearPeriodStarts) {
+              const key = getBucketKey(periodStart, gran);
+              priorYearBuckets.set(key, createStreamingState());
+            }
+
+            // Fetch prior year data
+            let priorYearPath = `/${entity}?$select=${encodeURIComponent(Array.from(fieldsNeeded).join(","))}&$filter=${encodeURIComponent(priorYearCombinedFilter)}`;
+            let priorYearNextLink: string | undefined = priorYearPath;
+
+            while (priorYearNextLink) {
+              const response: ODataResponse<Record<string, unknown>> = await client.request(priorYearNextLink);
+
+              if (response.value && Array.isArray(response.value)) {
+                for (const record of response.value) {
+                  const dateValue = record[dateField];
+                  if (!dateValue) continue;
+
+                  const recordDate = new Date(dateValue as string);
+                  if (isNaN(recordDate.getTime())) continue;
+
+                  const bucketKey = getBucketKey(recordDate, gran);
+                  const state = priorYearBuckets.get(bucketKey);
+
+                  if (state) {
+                    if (valueField === "*") {
+                      state.count++;
+                    } else {
+                      updateStreamingState(state, record[valueField]);
+                    }
+                  }
+                }
+              }
+
+              priorYearNextLink = response["@odata.nextLink"];
+            }
+
+            // Calculate prior year values and YoY changes
+            priorYearValues = [];
+            yoyChanges = [];
+
+            for (let i = 0; i < priorYearPeriodStarts.length; i++) {
+              const key = getBucketKey(priorYearPeriodStarts[i], gran);
+              const priorState = priorYearBuckets.get(key);
+              const priorValue = priorState ? finalizeStreamingValue(priorState, aggFunc) : null;
+              priorYearValues.push(priorValue);
+
+              // Calculate YoY change percentage
+              if (priorValue !== null && priorValue !== 0 && orderedValues[i] !== undefined) {
+                yoyChanges.push(((orderedValues[i] - priorValue) / priorValue) * 100);
+              } else {
+                yoyChanges.push(null);
+              }
+            }
+          }
+        }
+
         // Build data points
         const dataPoints: TrendDataPoint[] = orderedPeriods.map((period, i) => ({
           period,
           value: orderedValues[i],
           growthRate: growthRates[i],
           movingAverage: movingAverages[i],
+          priorYearValue: compareYoY ? priorYearValues[i] : undefined,
+          yoyChange: compareYoY ? yoyChanges[i] : undefined,
         }));
 
         const output = formatTrendingResults(
@@ -413,7 +536,8 @@ Examples:
           aggFunc,
           gran,
           movingAverageWindow !== undefined && movingAverageWindow > 1,
-          movingAverageWindow
+          movingAverageWindow,
+          compareYoY
         );
 
         const timing = formatTiming(Date.now() - startTime);

@@ -14,6 +14,7 @@ const TOKEN_EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 export class TokenManager {
   private config: D365Config;
   private cachedToken: CachedToken | null = null;
+  private refreshPromise: Promise<CachedToken> | null = null;
 
   constructor(config: D365Config) {
     this.config = config;
@@ -21,6 +22,7 @@ export class TokenManager {
 
   /**
    * Get a valid access token, refreshing if necessary
+   * Uses a shared promise to prevent concurrent token refresh requests
    */
   async getToken(): Promise<string> {
     // Check if cached token is still valid
@@ -28,12 +30,23 @@ export class TokenManager {
       return this.cachedToken.accessToken;
     }
 
-    // Fetch new token
+    // If a refresh is already in progress, wait for it
+    if (this.refreshPromise) {
+      const token = await this.refreshPromise;
+      return token.accessToken;
+    }
+
+    // Start a new refresh and share the promise with concurrent callers
     log("Acquiring new OAuth2 token...");
-    const token = await this.fetchToken();
-    this.cachedToken = token;
-    log("Token acquired successfully");
-    return token.accessToken;
+    this.refreshPromise = this.fetchToken();
+    try {
+      const token = await this.refreshPromise;
+      this.cachedToken = token;
+      log("Token acquired successfully");
+      return token.accessToken;
+    } finally {
+      this.refreshPromise = null;
+    }
   }
 
   /**

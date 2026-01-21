@@ -115,7 +115,7 @@ async function findCustomerByName(
   // Strategy 3: Fetch and filter client-side
   try {
     await progress.report("Searching for customer (client-side filter)...");
-    const path = `/CustomersV3?$top=1000&$select=CustomerAccount,CustomerName,CustomerGroup,Currency`;
+    const path = `/CustomersV3?$top=1000&$select=CustomerAccount,CustomerName,CustomerGroup,Currency,dataAreaId`;
     const response: ODataResponse<CustomerProfile> = await client.request(path);
 
     if (response.value) {
@@ -124,13 +124,17 @@ async function findCustomerByName(
         return typeof name === "string" && name.toLowerCase().includes(searchTermLower);
       });
       if (match) {
-        // Fetch full customer record
-        const fullPath = `/CustomersV3(dataAreaId='usmf',CustomerAccount='${escapeODataString(match.CustomerAccount)}')`;
-        try {
-          return await client.request<CustomerProfile>(fullPath);
-        } catch {
-          return match;
+        // Fetch full customer record using dataAreaId from the match
+        const dataAreaId = (match as Record<string, unknown>).dataAreaId as string | undefined;
+        if (dataAreaId) {
+          const fullPath = `/CustomersV3(dataAreaId='${escapeODataString(dataAreaId)}',CustomerAccount='${escapeODataString(match.CustomerAccount)}')`;
+          try {
+            return await client.request<CustomerProfile>(fullPath);
+          } catch {
+            return match;
+          }
         }
+        return match;
       }
     }
   } catch {

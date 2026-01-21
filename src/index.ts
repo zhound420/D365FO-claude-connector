@@ -33,9 +33,25 @@ const SERVER_NAME = "Microsoft D365";
 const SERVER_VERSION = "2.0.0";
 
 /**
+ * Verify D365 connectivity at startup
+ */
+async function verifyD365Connectivity(client: D365Client): Promise<boolean> {
+  try {
+    log("Verifying D365 connectivity...");
+    // Make a lightweight API call to verify token and connectivity
+    await client.fetchEntityList();
+    log("D365 connectivity verified successfully");
+    return true;
+  } catch (error) {
+    logError("D365 connectivity check failed", error);
+    return false;
+  }
+}
+
+/**
  * Create and configure the MCP server
  */
-function createServer(): McpServer {
+async function createServer(): Promise<{ server: McpServer; client: D365Client }> {
   const server = new McpServer({
     name: SERVER_NAME,
     version: SERVER_VERSION,
@@ -49,6 +65,12 @@ function createServer(): McpServer {
   const client = new D365Client(config);
   const metadataCache = new MetadataCache(client);
 
+  // Verify D365 connectivity at startup
+  const isConnected = await verifyD365Connectivity(client);
+  if (!isConnected) {
+    log("Warning: Starting server despite connectivity issues. Tools may fail until connectivity is restored.");
+  }
+
   // Pre-load entity names for faster tool responses (fast tier)
   // Full EDMX metadata will be loaded on-demand when detailed schema is needed
   metadataCache.ensureEntityNamesLoaded().catch((err) => {
@@ -61,7 +83,7 @@ function createServer(): McpServer {
   // Register tools (for actions)
   registerAllTools(server, client, metadataCache);
 
-  return server;
+  return { server, client };
 }
 
 /**
@@ -125,12 +147,56 @@ async function startHttpServer(server: McpServer): Promise<void> {
 }
 
 /**
+ * Setup graceful shutdown handlers
+ */
+function setupGracefulShutdown(server: McpServer): void {
+  let isShuttingDown = false;
+
+  const shutdown = async (signal: string) => {
+    if (isShuttingDown) {
+      return;
+    }
+    isShuttingDown = true;
+
+    log(`Received ${signal}, shutting down gracefully...`);
+
+    try {
+      // Close the MCP server connection
+      await server.close();
+      log("MCP server closed successfully");
+    } catch (error) {
+      logError("Error during shutdown", error);
+    }
+
+    process.exit(0);
+  };
+
+  // Handle termination signals
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+
+  // Handle uncaught errors gracefully
+  process.on("uncaughtException", (error) => {
+    logError("Uncaught exception", error);
+    shutdown("uncaughtException");
+  });
+
+  process.on("unhandledRejection", (reason) => {
+    logError("Unhandled rejection", reason);
+    // Don't shut down on unhandled rejection, just log it
+  });
+}
+
+/**
  * Main entry point
  */
 async function main(): Promise<void> {
   try {
-    const server = createServer();
+    const { server } = await createServer();
     const transportMode = getTransportMode();
+
+    // Setup graceful shutdown handlers
+    setupGracefulShutdown(server);
 
     if (transportMode === "http") {
       await startHttpServer(server);

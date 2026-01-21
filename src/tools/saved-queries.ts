@@ -57,14 +57,30 @@ export function loadSavedQueries(): Record<string, SavedQuery> {
 }
 
 /**
- * Save queries to disk
+ * Save queries to disk using atomic write (write to temp, then rename)
  */
 function saveQueries(queries: Record<string, SavedQuery>): void {
   const storage: QueriesStorage = {
     version: 1,
     queries,
   };
-  fs.writeFileSync(QUERIES_FILE, JSON.stringify(storage, null, 2), "utf-8");
+  const content = JSON.stringify(storage, null, 2);
+
+  // Write to a temporary file first, then atomically rename
+  // This prevents file corruption if the process crashes mid-write
+  const tempFile = `${QUERIES_FILE}.tmp.${process.pid}`;
+  try {
+    fs.writeFileSync(tempFile, content, "utf-8");
+    fs.renameSync(tempFile, QUERIES_FILE);
+  } catch (error) {
+    // Clean up temp file if rename fails
+    try {
+      fs.unlinkSync(tempFile);
+    } catch {
+      // Ignore cleanup errors
+    }
+    throw error;
+  }
 }
 
 /**

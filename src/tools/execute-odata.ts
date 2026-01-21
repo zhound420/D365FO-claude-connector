@@ -99,7 +99,11 @@ Examples:
 Auto-pagination:
 - Set fetchAll=true to automatically fetch all pages of results
 - Use maxRecords to limit total results (default: 50,000)
-- Example: path="CustomersV3", fetchAll=true, maxRecords=1000`,
+- Example: path="CustomersV3", fetchAll=true, maxRecords=1000
+
+Offset pagination:
+- Use skip parameter for offset-based pagination
+- Example: path="CustomersV3?$top=100", skip=100 (skip first 100 records)`,
     {
       path: z.string().describe(
         "OData path to execute (appended to /data/). Include entity name, keys, query parameters, etc."
@@ -110,11 +114,20 @@ Auto-pagination:
       maxRecords: z.number().optional().default(DEFAULT_MAX_RECORDS).describe(
         `Maximum records to fetch when fetchAll=true (default: ${DEFAULT_MAX_RECORDS})`
       ),
+      skip: z.number().optional().describe(
+        "Number of records to skip (OData $skip parameter). Useful for offset pagination."
+      ),
     },
-    async ({ path, fetchAll, maxRecords }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ path, fetchAll, maxRecords, skip }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       try {
         // Normalize path - ensure it starts with /
-        const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+        let normalizedPath = path.startsWith("/") ? path : `/${path}`;
+
+        // Add $skip parameter if provided
+        if (skip !== undefined && skip > 0) {
+          const separator = normalizedPath.includes("?") ? "&" : "?";
+          normalizedPath += `${separator}$skip=${skip}`;
+        }
 
         // Handle auto-pagination if requested
         if (fetchAll) {

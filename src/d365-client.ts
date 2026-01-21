@@ -28,6 +28,42 @@ export class D365Error extends Error {
 }
 
 /**
+ * Default request timeout in milliseconds
+ */
+const DEFAULT_TIMEOUT_MS = 30000;
+
+/**
+ * Maximum retry attempts for transient failures
+ */
+const MAX_RETRIES = 3;
+
+/**
+ * Base delay for exponential backoff (ms)
+ */
+const BASE_RETRY_DELAY_MS = 1000;
+
+/**
+ * HTTP status codes that should trigger a retry
+ */
+const RETRYABLE_STATUS_CODES = [429, 502, 503, 504];
+
+/**
+ * Sleep for a given number of milliseconds
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Generate a unique correlation ID for request tracing
+ */
+function generateCorrelationId(): string {
+  const timestamp = Date.now().toString(36);
+  const random = Math.random().toString(36).substring(2, 8);
+  return `d365-${timestamp}-${random}`;
+}
+
+/**
  * D365 OData API Client
  */
 export class D365Client {
@@ -43,44 +79,106 @@ export class D365Client {
 
   /**
    * Make an authenticated request to the D365 OData API
+   * Includes automatic timeout and retry with exponential backoff
    */
   async request<T>(
     path: string,
-    options: RequestInit = {}
+    options: RequestInit = {},
+    timeoutMs: number = DEFAULT_TIMEOUT_MS
   ): Promise<T> {
-    const token = await this.tokenManager.getToken();
-
     const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
+    const correlationId = generateCorrelationId();
+    let lastError: Error | null = null;
 
-    const response = await fetch(url, {
-      ...options,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-        "OData-MaxVersion": "4.0",
-        "OData-Version": "4.0",
-        ...options.headers,
-      },
-    });
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const token = await this.tokenManager.getToken();
 
-    // Handle error responses
-    if (!response.ok) {
-      await this.handleErrorResponse(response);
+        // Create abort controller for timeout
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+          const response = await fetch(url, {
+            ...options,
+            signal: controller.signal,
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: "application/json",
+              "OData-MaxVersion": "4.0",
+              "OData-Version": "4.0",
+              "x-correlation-id": correlationId,
+              ...options.headers,
+            },
+          });
+
+          clearTimeout(timeoutId);
+
+          // Handle error responses
+          if (!response.ok) {
+            // Check if this is a retryable error
+            if (RETRYABLE_STATUS_CODES.includes(response.status) && attempt < MAX_RETRIES) {
+              // Get retry delay from Retry-After header or use exponential backoff
+              let retryDelay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
+              const retryAfterHeader = response.headers.get("Retry-After");
+              if (retryAfterHeader) {
+                const retryAfterSeconds = parseInt(retryAfterHeader, 10);
+                if (!isNaN(retryAfterSeconds)) {
+                  retryDelay = retryAfterSeconds * 1000;
+                }
+              }
+              log(`Request failed with status ${response.status}, retrying in ${retryDelay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+              await sleep(retryDelay);
+              continue;
+            }
+            await this.handleErrorResponse(response);
+          }
+
+          // Handle empty responses (e.g., 204 No Content)
+          if (response.status === 204) {
+            return undefined as T;
+          }
+
+          // Check content type for $count responses (returns plain text)
+          const contentType = response.headers.get("content-type") || "";
+          if (contentType.includes("text/plain")) {
+            const text = await response.text();
+            return parseInt(text, 10) as T;
+          }
+
+          return response.json() as Promise<T>;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      } catch (error) {
+        // Handle timeout/abort errors
+        if (error instanceof Error && error.name === "AbortError") {
+          lastError = new D365Error(`Request timed out after ${timeoutMs}ms [${correlationId}]`, 0);
+          if (attempt < MAX_RETRIES) {
+            const retryDelay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
+            log(`Request timed out [${correlationId}], retrying in ${retryDelay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+            await sleep(retryDelay);
+            continue;
+          }
+        } else if (error instanceof D365Error) {
+          // Add correlation ID to existing D365Error
+          error.message = `${error.message} [${correlationId}]`;
+          throw error;
+        } else {
+          lastError = error instanceof Error ? error : new Error(String(error));
+          // Network errors are retryable
+          if (attempt < MAX_RETRIES) {
+            const retryDelay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
+            log(`Network error [${correlationId}], retrying in ${retryDelay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+            await sleep(retryDelay);
+            continue;
+          }
+        }
+      }
     }
 
-    // Handle empty responses (e.g., 204 No Content)
-    if (response.status === 204) {
-      return undefined as T;
-    }
-
-    // Check content type for $count responses (returns plain text)
-    const contentType = response.headers.get("content-type") || "";
-    if (contentType.includes("text/plain")) {
-      const text = await response.text();
-      return parseInt(text, 10) as T;
-    }
-
-    return response.json() as Promise<T>;
+    // All retries exhausted
+    throw lastError || new D365Error(`Request failed after all retries [${correlationId}]`, 0);
   }
 
   /**
@@ -272,9 +370,18 @@ export class D365Client {
   }
 
   /**
+   * Escape single quotes in OData string values by doubling them
+   * e.g., "O'Brien" -> "O''Brien"
+   */
+  private escapeODataString(value: string): string {
+    return value.replace(/'/g, "''");
+  }
+
+  /**
    * Format key for OData request
    * Single key: 'value' -> 'value'
    * Compound key: { Field1: 'val1', Field2: 'val2' } -> "Field1='val1',Field2='val2'"
+   * Note: Single quotes in values are escaped by doubling them
    */
   private formatKey(key: string | Record<string, string>): string {
     if (typeof key === "string") {
@@ -282,13 +389,13 @@ export class D365Client {
       if (key.includes("=") || key.includes(",")) {
         return key;
       }
-      // Single key value - quote it
-      return `'${key}'`;
+      // Single key value - escape quotes and wrap
+      return `'${this.escapeODataString(key)}'`;
     }
 
-    // Compound key object
+    // Compound key object - escape quotes in each value
     return Object.entries(key)
-      .map(([field, value]) => `${field}='${value}'`)
+      .map(([field, value]) => `${field}='${this.escapeODataString(value)}'`)
       .join(",");
   }
 }

@@ -189,6 +189,19 @@ export class MetadataCache {
 
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
     log(`Schema ready: ${entities.size} entities, ${enums.size} enums (${elapsed}s)`);
+
+    // Schedule raw metadata cleanup after a short delay
+    // This retains it long enough for immediate entity detail lookups,
+    // but frees the 10-50MB memory after initial use
+    setTimeout(() => {
+      if (this.cache) {
+        const rawSize = this.cache.rawMetadata?.length || 0;
+        this.cache.rawMetadata = undefined;
+        if (rawSize > 0) {
+          log(`Cleared raw metadata cache (${(rawSize / 1024 / 1024).toFixed(1)} MB freed)`);
+        }
+      }
+    }, 5 * 60 * 1000); // 5 minutes
   }
 
   /**

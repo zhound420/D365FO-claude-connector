@@ -112,10 +112,16 @@ Examples:
         "OData $filter to apply to related records (e.g., 'LineAmount gt 1000')"
       ),
       top: z.number().optional().default(DEFAULT_MAX_RECORDS).describe(
-        `Maximum related records to return (default: ${DEFAULT_MAX_RECORDS})`
+        `Maximum related records to return per page (default: ${DEFAULT_MAX_RECORDS})`
+      ),
+      fetchAll: z.boolean().optional().default(false).describe(
+        "Automatically fetch all pages of related records (default: false)"
+      ),
+      maxRecords: z.number().optional().default(10000).describe(
+        "Maximum total records when fetchAll=true (default: 10000)"
       ),
     },
-    async ({ entity, key, relationship, select, filter, top }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ entity, key, relationship, select, filter, top, fetchAll, maxRecords }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       try {
         // Validate that the relationship exists using metadata cache
         const entityDef = await metadataCache.getEntityDefinition(entity);
@@ -155,14 +161,49 @@ Examples:
         // Build OData path: /Entity(key)/NavigationProperty?params
         const keyString = buildKeyString(key);
         const queryParams = buildQueryParams({ select, filter, top });
-        const path = `/${entity}${keyString}/${navProp.name}${queryParams}`;
+        const initialPath = `/${entity}${keyString}/${navProp.name}${queryParams}`;
 
-        // Execute request
-        const response: ODataResponse<Record<string, unknown>> = await client.request(path);
+        // Execute request(s) with optional pagination
+        let allRecords: Record<string, unknown>[] = [];
+        let totalCount: number | undefined;
+        let pagesFetched = 0;
+        let truncated = false;
+        let nextLink: string | undefined = initialPath;
 
-        // Handle response
-        const records = response.value || [];
-        const totalCount = response["@odata.count"];
+        if (fetchAll) {
+          // Paginated fetch
+          while (nextLink) {
+            const response: ODataResponse<Record<string, unknown>> = await client.request(nextLink);
+            pagesFetched++;
+
+            if (pagesFetched === 1 && response["@odata.count"] !== undefined) {
+              totalCount = response["@odata.count"];
+            }
+
+            if (response.value && Array.isArray(response.value)) {
+              allRecords.push(...response.value);
+            }
+
+            if (allRecords.length >= maxRecords) {
+              truncated = true;
+              break;
+            }
+
+            nextLink = response["@odata.nextLink"];
+          }
+          allRecords = allRecords.slice(0, maxRecords);
+        } else {
+          // Single request
+          const response: ODataResponse<Record<string, unknown>> = await client.request(initialPath);
+          pagesFetched = 1;
+          allRecords = response.value || [];
+          totalCount = response["@odata.count"];
+
+          // Warn if there's more data available
+          if (response["@odata.nextLink"]) {
+            truncated = true;
+          }
+        }
 
         const lines: string[] = [];
 
@@ -170,9 +211,19 @@ Examples:
         lines.push(`Related Records: ${entity} → ${navProp.name}`);
         lines.push(`Target Entity: ${navProp.targetEntity}`);
 
-        let summary = `Found ${records.length} related record(s)`;
-        if (totalCount !== undefined && totalCount > records.length) {
-          summary += ` (${totalCount.toLocaleString()} total, limited by top=${top})`;
+        let summary = `Found ${allRecords.length} related record(s)`;
+        if (totalCount !== undefined && totalCount > allRecords.length) {
+          summary += ` (${totalCount.toLocaleString()} total)`;
+        }
+        if (fetchAll && pagesFetched > 1) {
+          summary += ` (${pagesFetched} pages)`;
+        }
+        if (truncated) {
+          if (fetchAll) {
+            summary += ` [truncated at maxRecords=${maxRecords}]`;
+          } else {
+            summary += ` [more available - use fetchAll=true]`;
+          }
         }
         lines.push(summary);
 
@@ -183,10 +234,10 @@ Examples:
         lines.push("");
 
         // Format records
-        if (records.length === 0) {
+        if (allRecords.length === 0) {
           lines.push("(no related records found)");
         } else {
-          lines.push(JSON.stringify(records, null, 2));
+          lines.push(JSON.stringify(allRecords, null, 2));
         }
 
         return {
