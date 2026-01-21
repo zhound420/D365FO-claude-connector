@@ -239,6 +239,9 @@ export class D365Client {
     if (params.$count) {
       parts.push("$count=true");
     }
+    if (params.$apply) {
+      parts.push(`$apply=${encodeURIComponent(params.$apply)}`);
+    }
 
     return parts.join("&");
   }

@@ -10,7 +10,8 @@
  *
  * Tools:
  * - describe_entity: Quick schema lookup
- * - execute_odata: Raw OData path execution
+ * - execute_odata: Raw OData path execution (with auto-pagination)
+ * - aggregate: Perform SUM, AVG, COUNT, MIN, MAX on entity data
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";

@@ -131,6 +131,7 @@ export interface QueryParams {
   $top?: number;
   $skip?: number;
   $count?: boolean;
+  $apply?: string;
 }
 
 /**
