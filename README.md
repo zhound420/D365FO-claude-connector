@@ -133,7 +133,7 @@ After adding the configuration, restart Claude Desktop or Claude Code.
 
 ## Talking to Claude - Example Prompts
 
-Once configured, you can ask Claude natural language questions about your D365 environment. Here are some examples:
+Once configured, you can ask Claude natural language questions about your D365 environment. Here are examples organized by capability:
 
 ### Discovering Entities
 
@@ -159,25 +159,153 @@ Claude will use `execute_odata` with path `SalesOrderHeaders/$count`
 
 Claude will construct an OData filter query automatically.
 
-### Complex Analysis
+### Aggregation & Analytics
 
-> **You:** Analyze the distribution of customers across different customer groups
+> **You:** Who are our top 20 customers by total spend?
 
-Claude will use `execute_code` to run:
-```javascript
-const customers = await d365.query('CustomersV3', { $select: 'CustomerGroup' });
-const distribution = {};
-for (const c of customers) {
-  distribution[c.CustomerGroup] = (distribution[c.CustomerGroup] || 0) + 1;
+Claude will use `aggregate` with groupBy, orderBy, and top:
+```json
+{
+  "entity": "SalesOrderLinesV2",
+  "aggregations": [{"function": "SUM", "field": "LineAmount"}],
+  "groupBy": ["OrderingCustomerAccountNumber"],
+  "orderBy": "sum_LineAmount desc",
+  "top": 20
 }
-return distribution;
 ```
 
-> **You:** Get me all open sales orders with their line items for customer US-001
+> **You:** What's the median order value? Show me the 90th and 95th percentiles too
 
-Claude will use `execute_odata` with expansion:
+Claude will use `aggregate` with percentile functions:
+```json
+{
+  "entity": "SalesOrderLinesV2",
+  "aggregations": [
+    {"function": "P50", "field": "LineAmount", "alias": "median"},
+    {"function": "P90", "field": "LineAmount"},
+    {"function": "P95", "field": "LineAmount"}
+  ],
+  "accurate": true
+}
 ```
-SalesOrderHeaders?$filter=CustomerAccount eq 'US-001' and SalesOrderStatus eq Microsoft.Dynamics.DataEntities.SalesOrderStatus'Open'&$expand=SalesOrderLines
+
+> **You:** Break down total revenue by product category
+
+Claude will use `aggregate` with groupBy:
+```json
+{
+  "entity": "SalesOrderLinesV2",
+  "aggregations": [{"function": "SUM", "field": "LineAmount"}],
+  "groupBy": ["ItemGroup"]
+}
+```
+
+### Time-Based Analysis
+
+> **You:** Show me the monthly sales trend for the past 12 months with growth rates
+
+Claude will use `trending`:
+```json
+{
+  "entity": "SalesOrderLinesV2",
+  "dateField": "CreatedDateTime",
+  "valueField": "LineAmount",
+  "granularity": "month",
+  "periods": 12,
+  "includeGrowthRate": true
+}
+```
+
+> **You:** Compare this year's sales to last year
+
+Claude will use `compare_periods` with YoY comparison:
+```json
+{
+  "entity": "SalesOrderLinesV2",
+  "dateField": "CreatedDateTime",
+  "comparisonType": "YoY",
+  "aggregations": [{"function": "SUM", "field": "LineAmount"}]
+}
+```
+
+> **You:** How did Q4 sales compare to Q3?
+
+Claude will use `compare_periods` with QoQ comparison:
+```json
+{
+  "entity": "SalesOrderLinesV2",
+  "dateField": "CreatedDateTime",
+  "comparisonType": "QoQ",
+  "aggregations": [{"function": "SUM", "field": "LineAmount"}]
+}
+```
+
+### Customer Intelligence
+
+> **You:** Give me a complete analysis of customer US-001 - profile, orders, spend, and trends
+
+Claude will use `analyze_customer` for comprehensive single-call analysis:
+```json
+{
+  "customerAccount": "US-001",
+  "includeOrders": true,
+  "includeSpend": true,
+  "includeTrending": true
+}
+```
+
+> **You:** Find the customer named "S&S Industries"
+
+Claude will use `search_entity` which handles special characters that break standard OData:
+```json
+{
+  "entity": "CustomersV3",
+  "searchTerm": "S&S Industries",
+  "searchField": "CustomerName"
+}
+```
+
+### Multi-Query & Joins
+
+> **You:** Get me a dashboard view: total customers, total orders this month, and top 5 products by sales
+
+Claude will use `batch_query` to run all three queries in parallel:
+```json
+{
+  "queries": [
+    {"name": "total_customers", "entity": "CustomersV3", "top": 1},
+    {"name": "orders_this_month", "entity": "SalesOrderHeadersV2", "filter": "OrderCreatedDateTime ge 2024-01-01"},
+    {"name": "top_products", "entity": "SalesOrderLinesV2", "top": 5, "orderby": "LineAmount desc"}
+  ]
+}
+```
+
+> **You:** Show me recent orders with customer names and their customer groups
+
+Claude will use `join_entities` to correlate orders with customer details:
+```json
+{
+  "primaryEntity": "SalesOrderHeadersV2",
+  "primaryKey": "OrderingCustomerAccountNumber",
+  "secondaryEntity": "CustomersV3",
+  "secondaryKey": "CustomerAccount",
+  "primarySelect": ["SalesOrderNumber", "OrderCreatedDateTime"],
+  "secondarySelect": ["CustomerName", "CustomerGroup"]
+}
+```
+
+### Data Export
+
+> **You:** Export all customers with credit limit over $100K to CSV
+
+Claude will use `export` with format and filter:
+```json
+{
+  "entity": "CustomersV3",
+  "format": "csv",
+  "filter": "CreditLimit gt 100000",
+  "select": ["CustomerAccount", "CustomerName", "CreditLimit"]
+}
 ```
 
 ### Understanding Enums
@@ -186,11 +314,11 @@ SalesOrderHeaders?$filter=CustomerAccount eq 'US-001' and SalesOrderStatus eq Mi
 
 Claude will check the `d365://enums` resource or use `execute_code` with `d365.getEnum('SalesOrderStatus')`.
 
-### Multi-Step Analysis
+### Complex Custom Analysis
 
 > **You:** Compare the average credit limits between US and EU customer groups
 
-Claude will write and execute sandbox code:
+For complex logic that doesn't fit built-in tools, Claude will use `execute_code`:
 ```javascript
 const customers = await d365.query('CustomersV3', {
   $filter: "CustomerGroup eq 'US' or CustomerGroup eq 'EU'",
