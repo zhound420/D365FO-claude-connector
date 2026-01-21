@@ -11,7 +11,6 @@
  * Tools:
  * - describe_entity: Quick schema lookup
  * - execute_odata: Raw OData path execution
- * - execute_code: Sandboxed JavaScript with D365 API access
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
