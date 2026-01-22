@@ -23,6 +23,7 @@ An MCP (Model Context Protocol) server that provides access to Microsoft Dynamic
 | Entity Schema | `d365://entity/{entityName}` | Full schema for any entity (fields, keys, navigation properties) |
 | Enum Definitions | `d365://enums` | All enum types with their values |
 | Saved Queries | `d365://queries` | List saved query templates |
+| Dashboard | `d365://dashboard` | JSON metrics for all environments (health, API stats, recent operations) |
 
 ### Tools
 
@@ -49,6 +50,7 @@ All tools support an optional `environment` parameter to target specific D365 en
 | `create_record` | Create new records (non-production environments only) |
 | `update_record` | Update existing records (non-production environments only) |
 | `delete_record` | Delete records (non-production environments only) |
+| `dashboard` | Display environment dashboard with health status, API statistics, and recent operations |
 
 ## Installation
 
