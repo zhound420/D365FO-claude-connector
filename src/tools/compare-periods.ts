@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
+import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import {
@@ -17,6 +18,7 @@ import {
   type DatePeriod,
 } from "../utils/date-utils.js";
 import { formatTiming } from "../progress.js";
+import { environmentSchema } from "./common.js";
 
 /**
  * Aggregation function types
@@ -289,7 +291,7 @@ function formatComparisonResults(
 /**
  * Register the compare_periods tool
  */
-export function registerComparePeriodsTool(server: McpServer, client: D365Client): void {
+export function registerComparePeriodsTool(server: McpServer, envManager: EnvironmentManager): void {
   server.tool(
     "compare_periods",
     `Compare aggregations between two time periods (YoY, QoQ, MoM, or custom ranges).
@@ -336,8 +338,11 @@ Examples:
       groupBy: z.array(z.string()).optional().describe(
         "Fields to group by for per-group comparisons"
       ),
+      environment: environmentSchema,
     },
-    async ({ entity, dateField, aggregations, comparisonType, referenceDate, period1, period2, filter, groupBy }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ entity, dateField, aggregations, comparisonType, referenceDate, period1, period2, filter, groupBy, environment }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+      const client = envManager.getClient(environment);
+
       try {
         const startTime = Date.now();
         let currentPeriod: DatePeriod;

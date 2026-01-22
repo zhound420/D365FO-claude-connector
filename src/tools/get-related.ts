@@ -6,14 +6,65 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
+import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
-import type { MetadataCache } from "../metadata-cache.js";
 import type { ODataResponse } from "../types.js";
+import { environmentSchema } from "./common.js";
 
 /**
  * Default max records for related entities
  */
 const DEFAULT_MAX_RECORDS = 1000;
+
+/**
+ * Timeout for paginated requests (60 seconds - longer than default 30s)
+ */
+const PAGINATION_TIMEOUT_MS = parseInt(process.env.D365_PAGINATION_TIMEOUT_MS || "60000", 10);
+
+/**
+ * Maximum retries for individual page fetches within pagination
+ */
+const PAGE_FETCH_MAX_RETRIES = 2;
+
+/**
+ * Sleep helper for retry backoff
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch a single page with retry logic for pagination operations.
+ */
+async function fetchPageWithRetry<T>(
+  client: D365Client,
+  url: string,
+  maxRetries: number = PAGE_FETCH_MAX_RETRIES
+): Promise<T> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await client.request<T>(url, {}, PAGINATION_TIMEOUT_MS);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      if (error instanceof D365Error) {
+        if (error.statusCode === 401 || error.statusCode === 403 ||
+            error.statusCode === 404 || error.statusCode === 400) {
+          throw error;
+        }
+      }
+
+      if (attempt < maxRetries) {
+        const backoffMs = 2000 * Math.pow(2, attempt);
+        await sleep(backoffMs);
+      }
+    }
+  }
+
+  throw lastError || new Error("Page fetch failed after retries");
+}
 
 /**
  * Build the key string for OData path
@@ -78,8 +129,7 @@ function buildQueryParams(options: {
  */
 export function registerGetRelatedTool(
   server: McpServer,
-  client: D365Client,
-  metadataCache: MetadataCache
+  envManager: EnvironmentManager
 ): void {
   server.tool(
     "get_related",
@@ -120,8 +170,12 @@ Examples:
       maxRecords: z.number().optional().default(10000).describe(
         "Maximum total records when fetchAll=true (default: 10000)"
       ),
+      environment: environmentSchema,
     },
-    async ({ entity, key, relationship, select, filter, top, fetchAll, maxRecords }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ entity, key, relationship, select, filter, top, fetchAll, maxRecords, environment }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+      const client = envManager.getClient(environment);
+      const metadataCache = envManager.getMetadataCache(environment);
+
       try {
         // Validate that the relationship exists using metadata cache
         const entityDef = await metadataCache.getEntityDefinition(entity);
@@ -164,6 +218,7 @@ Examples:
         const initialPath = `/${entity}${keyString}/${navProp.name}${queryParams}`;
 
         // Execute request(s) with optional pagination
+        // Uses per-page retry with 60s timeout for robustness
         let allRecords: Record<string, unknown>[] = [];
         let totalCount: number | undefined;
         let pagesFetched = 0;
@@ -171,9 +226,9 @@ Examples:
         let nextLink: string | undefined = initialPath;
 
         if (fetchAll) {
-          // Paginated fetch
+          // Paginated fetch with retry
           while (nextLink) {
-            const response: ODataResponse<Record<string, unknown>> = await client.request(nextLink);
+            const response: ODataResponse<Record<string, unknown>> = await fetchPageWithRetry(client, nextLink);
             pagesFetched++;
 
             if (pagesFetched === 1 && response["@odata.count"] !== undefined) {
@@ -193,8 +248,8 @@ Examples:
           }
           allRecords = allRecords.slice(0, maxRecords);
         } else {
-          // Single request
-          const response: ODataResponse<Record<string, unknown>> = await client.request(initialPath);
+          // Single request with longer timeout
+          const response: ODataResponse<Record<string, unknown>> = await client.request(initialPath, {}, PAGINATION_TIMEOUT_MS);
           pagesFetched = 1;
           allRecords = response.value || [];
           totalCount = response["@odata.count"];

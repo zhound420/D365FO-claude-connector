@@ -6,10 +6,12 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
+import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
-import { formatRecords, type ExportFormat, getMimeType } from "../utils/csv-utils.js";
+import { formatRecords, type ExportFormat } from "../utils/csv-utils.js";
 import { formatTiming } from "../progress.js";
+import { environmentSchema } from "./common.js";
 
 /**
  * Default max records for export
@@ -98,7 +100,7 @@ async function fetchAllRecords(
 /**
  * Register the export tool
  */
-export function registerExportTool(server: McpServer, client: D365Client): void {
+export function registerExportTool(server: McpServer, envManager: EnvironmentManager): void {
   server.tool(
     "export",
     `Export D365 entity data to CSV, JSON, or TSV format.
@@ -131,8 +133,11 @@ Examples:
       includeHeaders: z.boolean().optional().default(true).describe(
         "Include header row for CSV/TSV (default: true)"
       ),
+      environment: environmentSchema,
     },
-    async ({ entity, format, select, filter, orderBy, maxRecords, includeHeaders }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ entity, format, select, filter, orderBy, maxRecords, includeHeaders, environment }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+      const client = envManager.getClient(environment);
+
       try {
         const startTime = Date.now();
 

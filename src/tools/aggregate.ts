@@ -8,9 +8,66 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
+import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
-import { formatTiming } from "../progress.js";
+import { formatTiming, ProgressReporter } from "../progress.js";
+import { environmentSchema } from "./common.js";
+
+/**
+ * Timeout for paginated requests (60 seconds - longer than default 30s)
+ * Can be configured via environment variable
+ */
+const PAGINATION_TIMEOUT_MS = parseInt(process.env.D365_PAGINATION_TIMEOUT_MS || "60000", 10);
+
+/**
+ * Maximum retries for individual page fetches within pagination
+ */
+const PAGE_FETCH_MAX_RETRIES = 2;
+
+/**
+ * Sleep helper for retry backoff
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch a single page with retry logic for pagination operations.
+ * Uses longer timeout (60s) and retries with exponential backoff.
+ * This is in addition to the client-level retry for a more robust pagination.
+ */
+async function fetchPageWithRetry<T>(
+  client: D365Client,
+  url: string,
+  maxRetries: number = PAGE_FETCH_MAX_RETRIES
+): Promise<T> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await client.request<T>(url, {}, PAGINATION_TIMEOUT_MS);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      // Don't retry on non-retryable errors (auth, not found, bad request)
+      if (error instanceof D365Error) {
+        if (error.statusCode === 401 || error.statusCode === 403 ||
+            error.statusCode === 404 || error.statusCode === 400) {
+          throw error;
+        }
+      }
+
+      if (attempt < maxRetries) {
+        // Exponential backoff: 2s, 4s
+        const backoffMs = 2000 * Math.pow(2, attempt);
+        await sleep(backoffMs);
+      }
+    }
+  }
+
+  throw lastError || new Error("Page fetch failed after retries");
+}
 
 /**
  * Supported aggregation functions
@@ -42,6 +99,8 @@ interface AccurateModeProgress {
   recordsProcessed: number;
   totalCount?: number;
   elapsedMs: number;
+  isPartial?: boolean;
+  partialReason?: string;
 }
 
 /**
@@ -393,6 +452,12 @@ function formatAccurateModeResult(
   const lines: string[] = [];
 
   // Header with progress info
+  if (progress.isPartial) {
+    lines.push("⚠️ PARTIAL RESULTS - Operation did not complete");
+    lines.push(`Reason: ${progress.partialReason || "Unknown error"}`);
+    lines.push("");
+  }
+
   if (groupBy && groupBy.length > 0) {
     lines.push(`Aggregation Results - Accurate Mode (${results.length} groups)`);
   } else {
@@ -401,6 +466,10 @@ function formatAccurateModeResult(
   lines.push(`Records processed: ${progress.recordsProcessed.toLocaleString()}`);
   if (progress.totalCount !== undefined) {
     lines.push(`Total available: ${progress.totalCount.toLocaleString()}`);
+    if (progress.isPartial && progress.totalCount > progress.recordsProcessed) {
+      const pct = ((progress.recordsProcessed / progress.totalCount) * 100).toFixed(1);
+      lines.push(`Coverage: ${pct}% of total records`);
+    }
   }
   lines.push(`Pages fetched: ${progress.pagesFetched}`);
   lines.push(`Time elapsed: ${(progress.elapsedMs / 1000).toFixed(1)}s`);
@@ -440,13 +509,15 @@ function formatAccurateModeResult(
 /**
  * Fetch all records with streaming aggregation (accurate mode)
  * Does not store all records in memory - aggregates as pages arrive
+ * Uses per-page retry with 60s timeout for robustness on large datasets
  */
 async function fetchAndAggregateStreaming(
   client: D365Client,
   entity: string,
   aggregations: AggregationSpec[],
   filter?: string,
-  groupBy?: string[]
+  groupBy?: string[],
+  progressReporter?: ProgressReporter
 ): Promise<{ results: AggregationResult[]; progress: AccurateModeProgress }> {
   const startTime = Date.now();
 
@@ -478,6 +549,7 @@ async function fetchAndAggregateStreaming(
   }
 
   // Build initial query - no $top for accurate mode (let D365 paginate naturally)
+  // Add $count=true to get total count on first page
   const selectFields = Array.from(fieldsNeeded).join(",");
   let path = `/${entity}`;
   const queryParams: string[] = [];
@@ -487,6 +559,7 @@ async function fetchAndAggregateStreaming(
   if (filter) {
     queryParams.push(`$filter=${encodeURIComponent(filter)}`);
   }
+  queryParams.push("$count=true");
   if (queryParams.length > 0) {
     path += `?${queryParams.join("&")}`;
   }
@@ -494,58 +567,85 @@ async function fetchAndAggregateStreaming(
   let nextLink: string | undefined = path;
   let pagesFetched = 0;
   let recordsProcessed = 0;
+  let totalCount: number | undefined;
+  let isPartial = false;
+  let partialReason: string | undefined;
 
-  // Fetch pages and aggregate
-  while (nextLink) {
-    const response: ODataResponse<Record<string, unknown>> = await client.request(nextLink);
-    pagesFetched++;
+  // Fetch pages and aggregate with retry logic
+  try {
+    while (nextLink) {
+      const response: ODataResponse<Record<string, unknown>> = await fetchPageWithRetry(client, nextLink);
+      pagesFetched++;
 
-    if (response.value && Array.isArray(response.value)) {
-      for (const record of response.value) {
-        recordsProcessed++;
+      // Capture total count from first response
+      if (pagesFetched === 1 && response["@odata.count"] !== undefined) {
+        totalCount = response["@odata.count"];
+      }
 
-        // Determine group key
-        // Use JSON.stringify to avoid collisions when values contain delimiter characters
-        let groupKeyStr = "__all__";
-        if (groupBy && groupBy.length > 0) {
-          const keyParts = groupBy.map((field) => record[field] ?? null);
-          groupKeyStr = JSON.stringify(keyParts);
+      if (response.value && Array.isArray(response.value)) {
+        for (const record of response.value) {
+          recordsProcessed++;
 
-          // Initialize group if new
-          if (!stateMap.has(groupKeyStr)) {
-            const aggStates = new Map<string, StreamingAggState>();
-            for (const agg of aggregations) {
-              const alias = agg.alias || `${agg.function.toLowerCase()}_${agg.field === "*" ? "all" : agg.field}`;
-              aggStates.set(alias, createStreamingState());
+          // Determine group key
+          // Use JSON.stringify to avoid collisions when values contain delimiter characters
+          let groupKeyStr = "__all__";
+          if (groupBy && groupBy.length > 0) {
+            const keyParts = groupBy.map((field) => record[field] ?? null);
+            groupKeyStr = JSON.stringify(keyParts);
+
+            // Initialize group if new
+            if (!stateMap.has(groupKeyStr)) {
+              const aggStates = new Map<string, StreamingAggState>();
+              for (const agg of aggregations) {
+                const alias = agg.alias || `${agg.function.toLowerCase()}_${agg.field === "*" ? "all" : agg.field}`;
+                aggStates.set(alias, createStreamingState());
+              }
+              stateMap.set(groupKeyStr, aggStates);
+
+              // Store actual group key values
+              const groupKey: Record<string, unknown> = {};
+              for (const field of groupBy) {
+                groupKey[field] = record[field];
+              }
+              groupKeyMap.set(groupKeyStr, groupKey);
             }
-            stateMap.set(groupKeyStr, aggStates);
-
-            // Store actual group key values
-            const groupKey: Record<string, unknown> = {};
-            for (const field of groupBy) {
-              groupKey[field] = record[field];
-            }
-            groupKeyMap.set(groupKeyStr, groupKey);
           }
-        }
 
-        // Update aggregations for this record
-        const aggStates = stateMap.get(groupKeyStr)!;
-        for (const agg of aggregations) {
-          const alias = agg.alias || `${agg.function.toLowerCase()}_${agg.field === "*" ? "all" : agg.field}`;
-          const state = aggStates.get(alias)!;
+          // Update aggregations for this record
+          const aggStates = stateMap.get(groupKeyStr)!;
+          for (const agg of aggregations) {
+            const alias = agg.alias || `${agg.function.toLowerCase()}_${agg.field === "*" ? "all" : agg.field}`;
+            const state = aggStates.get(alias)!;
 
-          if (agg.field === "*") {
-            // COUNT(*) - just increment count
-            state.count++;
-          } else {
-            updateStreamingState(state, record[agg.field], agg.function);
+            if (agg.field === "*") {
+              // COUNT(*) - just increment count
+              state.count++;
+            } else {
+              updateStreamingState(state, record[agg.field], agg.function);
+            }
           }
         }
       }
-    }
 
-    nextLink = response["@odata.nextLink"];
+      // Report progress every 10 pages
+      if (progressReporter && pagesFetched % 10 === 0) {
+        const totalInfo = totalCount !== undefined ? ` of ${totalCount.toLocaleString()}` : "";
+        const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+        await progressReporter.report(
+          `Page ${pagesFetched}: ${recordsProcessed.toLocaleString()}${totalInfo} records (${elapsed}s)`
+        );
+      }
+
+      nextLink = response["@odata.nextLink"];
+    }
+  } catch (error) {
+    // On error, return partial results if we've processed any records
+    if (recordsProcessed > 0) {
+      isPartial = true;
+      partialReason = error instanceof Error ? error.message : String(error);
+    } else {
+      throw error;
+    }
   }
 
   // Finalize results
@@ -554,7 +654,10 @@ async function fetchAndAggregateStreaming(
   const progress: AccurateModeProgress = {
     pagesFetched,
     recordsProcessed,
+    totalCount,
     elapsedMs: Date.now() - startTime,
+    isPartial,
+    partialReason,
   };
 
   return { results, progress };
@@ -768,15 +871,166 @@ function applySortingAndLimiting(
 }
 
 /**
+ * Sampling threshold - use sampling when total count exceeds this
+ */
+const SAMPLING_THRESHOLD = 100000;
+
+/**
+ * Sample size for statistical estimation
+ */
+const SAMPLE_SIZE = 10000;
+
+/**
+ * Fetch a random sample for statistical estimation
+ * Uses $skip with random offset to get a distributed sample
+ */
+async function fetchSampledAggregation(
+  client: D365Client,
+  entity: string,
+  aggregations: AggregationSpec[],
+  totalCount: number,
+  filter?: string,
+  groupBy?: string[],
+  progressReporter?: ProgressReporter
+): Promise<{ results: AggregationResult[]; sampleSize: number; totalCount: number; elapsedMs: number }> {
+  const startTime = Date.now();
+
+  // Extract fields needed
+  const fieldsNeeded = new Set<string>();
+  for (const agg of aggregations) {
+    if (agg.field !== "*") {
+      fieldsNeeded.add(agg.field);
+    }
+  }
+  if (groupBy) {
+    for (const field of groupBy) {
+      fieldsNeeded.add(field);
+    }
+  }
+
+  const selectFields = Array.from(fieldsNeeded).join(",");
+  const allRecords: Record<string, unknown>[] = [];
+
+  // Calculate how many chunks to sample from
+  const numChunks = Math.min(10, Math.ceil(totalCount / SAMPLE_SIZE));
+  const chunkSize = Math.floor(totalCount / numChunks);
+  const recordsPerChunk = Math.ceil(SAMPLE_SIZE / numChunks);
+
+  if (progressReporter) {
+    await progressReporter.report(`Sampling ${SAMPLE_SIZE.toLocaleString()} records from ${totalCount.toLocaleString()} total...`);
+  }
+
+  // Fetch samples from different parts of the dataset
+  for (let i = 0; i < numChunks; i++) {
+    const skipOffset = i * chunkSize;
+
+    let path = `/${entity}?$top=${recordsPerChunk}&$skip=${skipOffset}`;
+    if (selectFields) {
+      path += `&$select=${encodeURIComponent(selectFields)}`;
+    }
+    if (filter) {
+      path += `&$filter=${encodeURIComponent(filter)}`;
+    }
+
+    try {
+      const response: ODataResponse<Record<string, unknown>> = await fetchPageWithRetry(client, path);
+      if (response.value && Array.isArray(response.value)) {
+        allRecords.push(...response.value);
+      }
+    } catch {
+      // Skip failed chunks, continue sampling
+    }
+
+    if (allRecords.length >= SAMPLE_SIZE) {
+      break;
+    }
+  }
+
+  // Perform aggregation on sample
+  const results = performClientSideAggregation(allRecords.slice(0, SAMPLE_SIZE), aggregations, groupBy);
+
+  // Scale up results based on sampling ratio (for SUM only)
+  const scaleFactor = totalCount / allRecords.length;
+  for (const result of results) {
+    for (const agg of aggregations) {
+      const alias = agg.alias || `${agg.function.toLowerCase()}_${agg.field === "*" ? "all" : agg.field}`;
+      if (agg.function === "SUM" || agg.function === "COUNT") {
+        result.values[alias] = Math.round(result.values[alias] * scaleFactor);
+      }
+      // AVG, MIN, MAX, percentiles don't need scaling
+    }
+  }
+
+  return {
+    results,
+    sampleSize: allRecords.length,
+    totalCount,
+    elapsedMs: Date.now() - startTime,
+  };
+}
+
+/**
+ * Format sampling mode result
+ */
+function formatSamplingResult(
+  results: AggregationResult[],
+  groupBy: string[] | undefined,
+  sampleSize: number,
+  totalCount: number,
+  elapsedMs: number
+): string {
+  const lines: string[] = [];
+
+  lines.push("⚡ ESTIMATED RESULTS (Sampling Mode)");
+  lines.push(`Sample: ${sampleSize.toLocaleString()} of ${totalCount.toLocaleString()} records (${((sampleSize / totalCount) * 100).toFixed(1)}%)`);
+  lines.push(`Time: ${(elapsedMs / 1000).toFixed(1)}s`);
+  lines.push("");
+  lines.push("Note: SUM and COUNT values are extrapolated estimates.");
+  lines.push("Use accurate=true for precise totals (will take longer).");
+  lines.push("");
+
+  if (groupBy && groupBy.length > 0) {
+    for (const result of results) {
+      const groupDesc = groupBy
+        .map((field) => `${field}=${result.groupKey?.[field] ?? "null"}`)
+        .join(", ");
+      lines.push(`[${groupDesc}]`);
+
+      for (const [alias, value] of Object.entries(result.values)) {
+        const formattedValue = Number.isInteger(value)
+          ? `~${value.toLocaleString()}`
+          : `~${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+        lines.push(`  ${alias}: ${formattedValue}`);
+      }
+      lines.push("");
+    }
+  } else {
+    const result = results[0];
+    if (result) {
+      for (const [alias, value] of Object.entries(result.values)) {
+        const formattedValue = Number.isInteger(value)
+          ? `~${value.toLocaleString()}`
+          : `~${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+        lines.push(`${alias}: ${formattedValue}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+/**
  * Register the aggregate tool
  */
-export function registerAggregateTool(server: McpServer, client: D365Client): void {
+export function registerAggregateTool(server: McpServer, envManager: EnvironmentManager): void {
   server.tool(
     "aggregate",
     `Perform aggregations (SUM, AVG, COUNT, MIN, MAX, COUNTDISTINCT, P50, P90, P95, P99) on D365 entity data.
 
 Uses fast /$count endpoint for simple COUNT operations, client-side aggregation for other operations.
 Default mode caps at 5K records for quick estimates. Use accurate=true to fetch ALL records for precise totals.
+
+For very large datasets (100K+ records), use sampling=true for fast statistical estimates.
 
 Supports orderBy and top parameters for ranked results (e.g., "top 20 customers by sales").
 Percentiles: P50 (median), P90, P95, P99 are useful for understanding value distributions.
@@ -787,6 +1041,7 @@ Examples:
 - Median order value: entity="SalesOrderLines", aggregations=[{function: "P50", field: "LineAmount"}], accurate=true
 - P90 order value: entity="SalesOrderLines", aggregations=[{function: "P90", field: "LineAmount"}], accurate=true
 - Accurate sum (all records): entity="SalesOrderLines", aggregations=[{function: "SUM", field: "LineAmount"}], accurate=true
+- Fast estimate on large dataset: sampling=true (uses ~10K record sample for statistical estimate)
 - Multiple aggregations: aggregations=[{function: "SUM", field: "LineAmount"}, {function: "AVG", field: "LineAmount"}]
 - With filter: filter="SalesOrderNumber eq 'SO-001'"
 - Group by: groupBy=["ItemNumber"] to get aggregations per item
@@ -808,16 +1063,22 @@ Examples:
       accurate: z.boolean().optional().default(false).describe(
         "When true, fetches ALL records for exact aggregation (no 5K limit). Shows progress metrics."
       ),
+      sampling: z.boolean().optional().default(false).describe(
+        "Use statistical sampling for fast estimates on very large datasets (100K+ records). Returns extrapolated estimates."
+      ),
       orderBy: z.string().optional().describe(
         "Sort results by aggregation alias, e.g. 'sum_LineAmount desc' or 'total_sales asc'"
       ),
       top: z.number().optional().describe(
         "Return only top N results after sorting (useful for 'top customers' queries)"
       ),
+      environment: environmentSchema,
     },
-    async ({ entity, aggregations, filter, groupBy, maxRecords, accurate, orderBy, top }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ entity, aggregations, filter, groupBy, maxRecords, accurate, sampling, orderBy, top, environment }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+      const client = envManager.getClient(environment);
       try {
         const startTime = Date.now();
+        const progressReporter = new ProgressReporter(server, "aggregate", extra.sessionId);
 
         // Check if this is a simple COUNT(*) with no groupBy
         const isSimpleCount =
@@ -828,7 +1089,7 @@ Examples:
 
         // Fast path: use /$count endpoint for simple COUNT operations
         // This works regardless of accurate mode since /$count is always accurate
-        if (isSimpleCount) {
+        if (isSimpleCount && !sampling) {
           const count = await tryFastCount(client, entity, filter);
           if (count !== null) {
             const alias = aggregations[0].alias || "count_all";
@@ -844,14 +1105,59 @@ Examples:
           }
         }
 
+        // Sampling mode: use statistical sampling for very large datasets
+        if (sampling) {
+          await progressReporter.report("Getting total count for sampling...");
+          const totalCount = await tryFastCount(client, entity, filter);
+
+          if (totalCount === null) {
+            return {
+              content: [{ type: "text", text: "Unable to get total count for sampling. Try without sampling=true." }],
+              isError: true,
+            };
+          }
+
+          if (totalCount < SAMPLING_THRESHOLD) {
+            // Dataset is small enough, just fetch all with accurate mode
+            await progressReporter.report(`Dataset has ${totalCount.toLocaleString()} records, using accurate mode instead of sampling.`);
+          } else {
+            const { results, sampleSize, elapsedMs } = await fetchSampledAggregation(
+              client,
+              entity,
+              aggregations,
+              totalCount,
+              filter,
+              groupBy,
+              progressReporter
+            );
+
+            // Apply sorting and limiting
+            const sortedResults = applySortingAndLimiting(results, orderBy, top);
+
+            const output = formatSamplingResult(sortedResults, groupBy, sampleSize, totalCount, elapsedMs);
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: output,
+                },
+              ],
+            };
+          }
+        }
+
         // Accurate mode: fetch ALL records with streaming aggregation
-        if (accurate) {
+        if (accurate || sampling) {
+          await progressReporter.report("Starting accurate aggregation (fetching all records)...");
+
           const { results, progress } = await fetchAndAggregateStreaming(
             client,
             entity,
             aggregations,
             filter,
-            groupBy
+            groupBy,
+            progressReporter
           );
 
           // Apply sorting and limiting

@@ -7,8 +7,10 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { D365Client, D365Error } from "../d365-client.js";
+import type { EnvironmentManager } from "../environment-manager.js";
+import { D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
+import { environmentSchema } from "./common.js";
 
 /**
  * Storage path for saved queries
@@ -245,7 +247,7 @@ Examples:
 /**
  * Register the execute_saved_query tool
  */
-export function registerExecuteSavedQueryTool(server: McpServer, client: D365Client): void {
+export function registerExecuteSavedQueryTool(server: McpServer, envManager: EnvironmentManager): void {
   server.tool(
     "execute_saved_query",
     `Execute a previously saved query template.
@@ -268,8 +270,10 @@ Examples:
       maxRecords: z.number().optional().default(50000).describe(
         "Maximum records to return (default: 50000). Limits results in both single-request and fetchAll modes."
       ),
+      environment: environmentSchema,
     },
-    async ({ name, params, fetchAll, maxRecords }) => {
+    async ({ name, params, fetchAll, maxRecords, environment }) => {
+      const client = envManager.getClient(environment);
       try {
         const queries = loadSavedQueries();
         const query = queries[name];
@@ -480,8 +484,8 @@ Examples:
 /**
  * Register all saved query tools
  */
-export function registerSavedQueryTools(server: McpServer, client: D365Client): void {
+export function registerSavedQueryTools(server: McpServer, envManager: EnvironmentManager): void {
   registerSaveQueryTool(server);
-  registerExecuteSavedQueryTool(server, client);
+  registerExecuteSavedQueryTool(server, envManager);
   registerDeleteSavedQueryTool(server);
 }

@@ -1,7 +1,7 @@
 /**
- * D365 Finance & Operations MCP Server v2.0
+ * D365 Finance & Operations MCP Server v3.0
  *
- * Provides read access to D365 F&O environments through:
+ * Provides multi-environment support with read/write capabilities:
  *
  * Resources:
  * - d365://entities?filter=<pattern> - List entities with optional filtering
@@ -12,78 +12,74 @@
  * - describe_entity: Quick schema lookup
  * - execute_odata: Raw OData path execution (with auto-pagination)
  * - aggregate: Perform SUM, AVG, COUNT, MIN, MAX on entity data
+ * - list_environments: List all configured environments
+ * - create_record: Create new records (non-production only)
+ * - update_record: Update existing records (non-production only)
+ * - delete_record: Delete records (non-production only)
+ *
+ * All tools support an optional 'environment' parameter to target specific environments.
+ * Production environments are always read-only.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import express from "express";
 import {
-  loadD365Config,
   getTransportMode,
   getHttpPort,
   log,
   logError,
 } from "./config.js";
-import { D365Client } from "./d365-client.js";
-import { MetadataCache } from "./metadata-cache.js";
+import { EnvironmentManager } from "./environment-manager.js";
 import { registerAllResources } from "./resources/index.js";
 import { registerAllTools } from "./tools/index.js";
 
 const SERVER_NAME = "Microsoft D365";
-const SERVER_VERSION = "2.0.0";
-
-/**
- * Verify D365 connectivity at startup
- */
-async function verifyD365Connectivity(client: D365Client): Promise<boolean> {
-  try {
-    log("Verifying D365 connectivity...");
-    // Make a lightweight API call to verify token and connectivity
-    await client.fetchEntityList();
-    log("D365 connectivity verified successfully");
-    return true;
-  } catch (error) {
-    logError("D365 connectivity check failed", error);
-    return false;
-  }
-}
+const SERVER_VERSION = "3.0.0";
 
 /**
  * Create and configure the MCP server
  */
-async function createServer(): Promise<{ server: McpServer; client: D365Client }> {
+async function createServer(): Promise<{ server: McpServer; envManager: EnvironmentManager }> {
   const server = new McpServer({
     name: SERVER_NAME,
     version: SERVER_VERSION,
   });
 
-  // Load D365 configuration
-  const config = loadD365Config();
-  log(`Connecting to D365 environment: ${config.environmentUrl}`);
+  // Initialize environment manager (loads all environment configs)
+  const envManager = new EnvironmentManager();
 
-  // Initialize D365 client and metadata cache
-  const client = new D365Client(config);
-  const metadataCache = new MetadataCache(client);
-
-  // Verify D365 connectivity at startup
-  const isConnected = await verifyD365Connectivity(client);
-  if (!isConnected) {
-    log("Warning: Starting server despite connectivity issues. Tools may fail until connectivity is restored.");
+  // Log configured environments
+  const environments = envManager.getEnvironments();
+  log(`Configured ${environments.length} environment(s):`);
+  for (const env of environments) {
+    const writeStatus = env.type === "production" ? "read-only" : "read/write";
+    const defaultMarker = env.default ? " [default]" : "";
+    log(`  - ${env.displayName} (${env.name}): ${env.type} [${writeStatus}]${defaultMarker}`);
   }
 
-  // Pre-load entity names for faster tool responses (fast tier)
-  // Full EDMX metadata will be loaded on-demand when detailed schema is needed
-  metadataCache.ensureEntityNamesLoaded().catch((err) => {
-    logError("Failed to pre-load entity list (tools will retry on first use)", err);
+  // Verify connectivity for the default environment
+  const defaultEnvName = envManager.getDefaultEnvironmentName();
+  const isConnected = await envManager.verifyConnectivity(defaultEnvName);
+  if (!isConnected) {
+    log("Warning: Starting server despite connectivity issues with default environment. Tools may fail until connectivity is restored.");
+  } else {
+    log(`Default environment connectivity verified: ${defaultEnvName}`);
+  }
+
+  // Pre-load entity names for the default environment
+  const defaultCache = envManager.getMetadataCache(defaultEnvName);
+  defaultCache.ensureEntityNamesLoaded().catch((err) => {
+    logError("Failed to pre-load entity list for default environment (tools will retry on first use)", err);
   });
 
   // Register resources (for schema discovery)
-  registerAllResources(server, metadataCache);
+  registerAllResources(server, envManager);
 
   // Register tools (for actions)
-  registerAllTools(server, client, metadataCache);
+  registerAllTools(server, envManager);
 
-  return { server, client };
+  return { server, envManager };
 }
 
 /**

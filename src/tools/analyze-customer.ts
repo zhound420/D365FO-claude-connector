@@ -7,6 +7,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
+import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import { ProgressReporter } from "../progress.js";
@@ -15,6 +16,7 @@ import {
   getBucketKey,
   generatePeriodStarts,
 } from "../utils/date-utils.js";
+import { environmentSchema } from "./common.js";
 
 /**
  * Default values
@@ -451,7 +453,7 @@ function formatAnalysisResults(result: AnalysisResult, elapsedMs: number): strin
 /**
  * Register the analyze_customer tool
  */
-export function registerAnalyzeCustomerTool(server: McpServer, client: D365Client): void {
+export function registerAnalyzeCustomerTool(server: McpServer, envManager: EnvironmentManager): void {
   server.tool(
     "analyze_customer",
     `Comprehensive customer analysis in a single call.
@@ -478,11 +480,13 @@ Examples:
       includeTrending: z.boolean().optional().default(true).describe("Include monthly trend analysis (default: true)"),
       recentOrdersLimit: z.number().optional().default(DEFAULT_RECENT_ORDERS).describe(`Number of recent orders to show (default: ${DEFAULT_RECENT_ORDERS})`),
       trendPeriods: z.number().optional().default(DEFAULT_TREND_PERIODS).describe(`Number of months for trend (default: ${DEFAULT_TREND_PERIODS})`),
+      environment: environmentSchema,
     },
     async (
-      { customerAccount, customerName, includeOrders, includeSpend, includeTrending, recentOrdersLimit, trendPeriods },
+      { customerAccount, customerName, includeOrders, includeSpend, includeTrending, recentOrdersLimit, trendPeriods, environment },
       extra: RequestHandlerExtra<ServerRequest, ServerNotification>
     ) => {
+      const client = envManager.getClient(environment);
       const startTime = Date.now();
       const progress = new ProgressReporter(server, "analyze_customer", extra.sessionId);
 

@@ -1,14 +1,17 @@
 # D365 Finance & Operations MCP Server
 
-An MCP (Model Context Protocol) server that provides read access to Microsoft Dynamics 365 Finance & Operations environments. Enables AI assistants like Claude to explore D365 metadata, query data, and execute custom logic through a secure sandbox.
+An MCP (Model Context Protocol) server that provides access to Microsoft Dynamics 365 Finance & Operations environments. Enables AI assistants like Claude to explore D365 metadata, query data, and perform write operations on non-production environments.
 
 ## Features
 
+- **Multi-Environment Support** - Connect to multiple D365 environments (production, UAT, dev)
+- **Read/Write Operations** - Query data on all environments; create, update, delete on non-production only
+- **Production Safety** - Production environments are always read-only by design
 - **MCP Resources** for schema discovery and metadata exploration
 - **Consolidated Tools** for flexible data access
 - **Sandboxed JavaScript Execution** for complex operations with D365 API access
 - **Secure Authentication** via Azure AD client credentials
-- **Automatic Metadata Caching** (24-hour TTL)
+- **Automatic Metadata Caching** (24-hour TTL, per-environment)
 
 ## Architecture
 
@@ -23,8 +26,11 @@ An MCP (Model Context Protocol) server that provides read access to Microsoft Dy
 
 ### Tools
 
+All tools support an optional `environment` parameter to target specific D365 environments.
+
 | Tool | Purpose |
 |------|---------|
+| `list_environments` | List all configured D365 environments with connection status |
 | `describe_entity` | Quick schema lookup for an entity |
 | `execute_odata` | Execute raw OData paths (queries, single records, counts) |
 | `execute_code` | Run JavaScript in a secure sandbox with D365 API access |
@@ -40,6 +46,9 @@ An MCP (Model Context Protocol) server that provides read access to Microsoft Dy
 | `batch_query` | Execute multiple queries in parallel |
 | `search_entity` | Robust entity search with automatic fallback strategies |
 | `analyze_customer` | Comprehensive single-call customer analysis |
+| `create_record` | Create new records (non-production environments only) |
+| `update_record` | Update existing records (non-production environments only) |
+| `delete_record` | Delete records (non-production environments only) |
 
 ## Installation
 
@@ -57,7 +66,54 @@ npm run build
 
 ## Configuration
 
-The server requires the following environment variables:
+### Multi-Environment Configuration (Recommended)
+
+Create a `d365-environments.json` file in the project root or working directory:
+
+```json
+{
+  "environments": [
+    {
+      "name": "production",
+      "displayName": "Production",
+      "type": "production",
+      "tenantId": "your-tenant-id",
+      "clientId": "your-client-id",
+      "clientSecret": "your-client-secret",
+      "environmentUrl": "https://your-company.operations.dynamics.com",
+      "default": true
+    },
+    {
+      "name": "uat",
+      "displayName": "UAT (Tier 2)",
+      "type": "non-production",
+      "tenantId": "your-tenant-id",
+      "clientId": "your-client-id",
+      "clientSecret": "your-client-secret",
+      "environmentUrl": "https://your-company-uat.sandbox.operations.dynamics.com"
+    },
+    {
+      "name": "dev",
+      "displayName": "Dev Sandbox",
+      "type": "non-production",
+      "tenantId": "your-tenant-id",
+      "clientId": "your-client-id",
+      "clientSecret": "your-client-secret",
+      "environmentUrl": "https://your-company-dev.sandbox.operations.dynamics.com"
+    }
+  ]
+}
+```
+
+**Environment Types:**
+- `type: "production"` - Read-only access (all write operations are blocked)
+- `type: "non-production"` - Full read/write access (create, update, delete enabled)
+
+Copy `d365-environments.example.json` as a starting point.
+
+### Single Environment (Legacy)
+
+The server also supports the following environment variables (fallback if no JSON config):
 
 | Variable | Description |
 |----------|-------------|
@@ -65,6 +121,7 @@ The server requires the following environment variables:
 | `D365_CLIENT_ID` | Azure AD application (client) ID |
 | `D365_CLIENT_SECRET` | Azure AD client secret |
 | `D365_ENVIRONMENT_URL` | D365 F&O environment URL (e.g., `https://contoso.operations.dynamics.com`) |
+| `D365_ENVIRONMENT_TYPE` | Optional: "production" or "non-production" (defaults to "production" for safety) |
 
 Optional:
 | Variable | Default | Description |
@@ -73,6 +130,7 @@ Optional:
 | `D365_HTTP_PORT` | `3000` | HTTP port (when using http transport) |
 | `D365_LOG_LEVEL` | `info` | Logging level |
 | `D365_PAGINATION_TIMEOUT_MS` | `60000` | Timeout (ms) for paginated requests on large datasets |
+| `D365_CONFIG_FILE` | | Path to config file if not in default location |
 
 ### Azure AD App Registration
 
@@ -951,9 +1009,78 @@ src/
     └── analyze-customer.ts # Customer analysis
 ```
 
+## Write Operations (Non-Production Only)
+
+Write operations are only available on environments with `type: "non-production"`. Production environments are always read-only.
+
+### `create_record`
+
+Create a new record in a D365 entity.
+
+**Parameters:**
+- `entity` (string, required): Entity name
+- `data` (object, required): Field values for the new record
+- `environment` (string, optional): Target environment
+
+**Example:**
+```json
+{
+  "entity": "CustomersV3",
+  "data": {
+    "CustomerAccount": "CUST-001",
+    "CustomerName": "Contoso Ltd",
+    "CustomerGroup": "US"
+  },
+  "environment": "uat"
+}
+```
+
+### `update_record`
+
+Update an existing record.
+
+**Parameters:**
+- `entity` (string, required): Entity name
+- `key` (string | object, required): Record key
+- `data` (object, required): Field values to update
+- `etag` (string, optional): ETag for optimistic concurrency
+- `environment` (string, optional): Target environment
+
+**Example:**
+```json
+{
+  "entity": "CustomersV3",
+  "key": "CUST-001",
+  "data": {
+    "CustomerName": "Contoso Corporation"
+  },
+  "environment": "dev"
+}
+```
+
+### `delete_record`
+
+Delete a record from an entity.
+
+**Parameters:**
+- `entity` (string, required): Entity name
+- `key` (string | object, required): Record key
+- `etag` (string, optional): ETag for optimistic concurrency
+- `environment` (string, optional): Target environment
+
+**Example:**
+```json
+{
+  "entity": "CustomersV3",
+  "key": "CUST-001",
+  "environment": "dev"
+}
+```
+
 ## Security Considerations
 
-- **Read-only access**: This server only supports read operations
+- **Production environments read-only**: Write operations are structurally blocked on production
+- **Non-production write access**: Create, update, delete only available on `type: "non-production"` environments
 - **Sandboxed execution**: JavaScript runs in isolated-vm with strict memory and time limits
 - **No credential exposure**: Credentials are managed server-side
 - **OData injection prevention**: Parameters are properly encoded

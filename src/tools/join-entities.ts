@@ -6,10 +6,11 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
+import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
-import type { MetadataCache } from "../metadata-cache.js";
 import type { ODataResponse, NavigationProperty, EntityDefinition } from "../types.js";
 import { ProgressReporter } from "../progress.js";
+import { environmentSchema } from "./common.js";
 
 /**
  * Default max records for join operations
@@ -519,8 +520,7 @@ function formatAvailableFields(entityDef: EntityDefinition): string {
  */
 export function registerJoinEntitiesTool(
   server: McpServer,
-  client: D365Client,
-  metadataCache: MetadataCache
+  envManager: EnvironmentManager
 ): void {
   server.tool(
     "join_entities",
@@ -549,8 +549,12 @@ Examples:
       strategy: z.enum(["auto", "expand", "client"]).optional().default("auto").describe(
         "Join strategy: 'auto' detects best approach, 'expand' forces $expand, 'client' forces client-side (default: auto)"
       ),
+      environment: environmentSchema,
     },
-    async ({ primary, secondary, joinType, flatten, maxRecords, strategy }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ primary, secondary, joinType, flatten, maxRecords, strategy, environment }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+      const client = envManager.getClient(environment);
+      const metadataCache = envManager.getMetadataCache(environment);
+
       try {
         const progress = new ProgressReporter(server, "join_entities", extra.sessionId);
 

@@ -6,9 +6,11 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
+import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import { ProgressReporter } from "../progress.js";
+import { environmentSchema } from "./common.js";
 
 /**
  * Default max records for auto-pagination
@@ -16,7 +18,58 @@ import { ProgressReporter } from "../progress.js";
 const DEFAULT_MAX_RECORDS = 50000;
 
 /**
+ * Timeout for paginated requests (60 seconds - longer than default 30s)
+ */
+const PAGINATION_TIMEOUT_MS = parseInt(process.env.D365_PAGINATION_TIMEOUT_MS || "60000", 10);
+
+/**
+ * Maximum retries for individual page fetches within pagination
+ */
+const PAGE_FETCH_MAX_RETRIES = 2;
+
+/**
+ * Sleep helper for retry backoff
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch a single page with retry logic for pagination operations.
+ */
+async function fetchPageWithRetry<T>(
+  client: D365Client,
+  url: string,
+  maxRetries: number = PAGE_FETCH_MAX_RETRIES
+): Promise<T> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await client.request<T>(url, {}, PAGINATION_TIMEOUT_MS);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      if (error instanceof D365Error) {
+        if (error.statusCode === 401 || error.statusCode === 403 ||
+            error.statusCode === 404 || error.statusCode === 400) {
+          throw error;
+        }
+      }
+
+      if (attempt < maxRetries) {
+        const backoffMs = 2000 * Math.pow(2, attempt);
+        await sleep(backoffMs);
+      }
+    }
+  }
+
+  throw lastError || new Error("Page fetch failed after retries");
+}
+
+/**
  * Execute OData request with automatic pagination
+ * Uses per-page retry with 60s timeout for robustness on large datasets
  */
 async function executeWithPagination(
   client: D365Client,
@@ -45,7 +98,7 @@ async function executeWithPagination(
   let nextLink: string | undefined = currentPath;
 
   while (nextLink) {
-    const response: ODataResponse = await client.request(nextLink);
+    const response: ODataResponse = await fetchPageWithRetry(client, nextLink);
     pagesFetched++;
 
     // Capture total count from first response
@@ -84,7 +137,7 @@ async function executeWithPagination(
 /**
  * Register the execute_odata tool
  */
-export function registerExecuteODataTool(server: McpServer, client: D365Client): void {
+export function registerExecuteODataTool(server: McpServer, envManager: EnvironmentManager): void {
   server.tool(
     "execute_odata",
     `Execute a raw OData path against D365. The path is appended to /data/.
@@ -117,8 +170,10 @@ Offset pagination:
       skip: z.number().optional().describe(
         "Number of records to skip (OData $skip parameter). Useful for offset pagination."
       ),
+      environment: environmentSchema,
     },
-    async ({ path, fetchAll, maxRecords, skip }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ path, fetchAll, maxRecords, skip, environment }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+      const client = envManager.getClient(environment);
       try {
         // Normalize path - ensure it starts with /
         let normalizedPath = path.startsWith("/") ? path : `/${path}`;

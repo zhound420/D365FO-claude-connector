@@ -6,9 +6,11 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
+import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import { ProgressReporter } from "../progress.js";
+import { environmentSchema } from "./common.js";
 
 /**
  * Limits for batch queries
@@ -17,6 +19,56 @@ const MAX_QUERIES = parseInt(process.env.D365_MAX_BATCH_QUERIES || "10", 10);
 const DEFAULT_TOP = 100;
 const DEFAULT_MAX_RECORDS = 5000;
 const MAX_CONCURRENT_REQUESTS = parseInt(process.env.D365_BATCH_CONCURRENCY || "5", 10);
+
+/**
+ * Timeout for paginated requests (60 seconds - longer than default 30s)
+ */
+const PAGINATION_TIMEOUT_MS = parseInt(process.env.D365_PAGINATION_TIMEOUT_MS || "60000", 10);
+
+/**
+ * Maximum retries for individual page fetches within pagination
+ */
+const PAGE_FETCH_MAX_RETRIES = 2;
+
+/**
+ * Sleep helper for retry backoff
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch a single page with retry logic for pagination operations.
+ */
+async function fetchPageWithRetry<T>(
+  client: D365Client,
+  url: string,
+  maxRetries: number = PAGE_FETCH_MAX_RETRIES
+): Promise<T> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await client.request<T>(url, {}, PAGINATION_TIMEOUT_MS);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      if (error instanceof D365Error) {
+        if (error.statusCode === 401 || error.statusCode === 403 ||
+            error.statusCode === 404 || error.statusCode === 400) {
+          throw error;
+        }
+      }
+
+      if (attempt < maxRetries) {
+        const backoffMs = 2000 * Math.pow(2, attempt);
+        await sleep(backoffMs);
+      }
+    }
+  }
+
+  throw lastError || new Error("Page fetch failed after retries");
+}
 
 /**
  * Schema for a single query in the batch
@@ -73,6 +125,7 @@ function buildQueryPath(query: BatchQueryItem): string {
 
 /**
  * Execute a single query with pagination support
+ * Uses per-page retry with 60s timeout for robustness on large datasets
  */
 async function executeWithPagination(
   client: D365Client,
@@ -92,7 +145,7 @@ async function executeWithPagination(
     let nextLink: string | undefined = currentPath;
 
     while (nextLink) {
-      const response: ODataResponse = await client.request(nextLink);
+      const response: ODataResponse = await fetchPageWithRetry(client, nextLink);
       pagesFetched++;
 
       if (pagesFetched === 1 && response["@odata.count"] !== undefined) {
@@ -136,6 +189,7 @@ async function executeWithPagination(
 
 /**
  * Execute a single query without pagination
+ * Uses longer timeout for consistency with paginated queries
  */
 async function executeSingleQuery(
   client: D365Client,
@@ -146,7 +200,7 @@ async function executeSingleQuery(
 
   try {
     const path = buildQueryPath(query);
-    const response: ODataResponse = await client.request(path);
+    const response: ODataResponse = await client.request(path, {}, PAGINATION_TIMEOUT_MS);
 
     return {
       name: queryName,
@@ -347,7 +401,7 @@ function formatBatchResults(results: QueryResult[], totalElapsedMs: number): str
 /**
  * Register the batch_query tool
  */
-export function registerBatchQueryTool(server: McpServer, client: D365Client): void {
+export function registerBatchQueryTool(server: McpServer, envManager: EnvironmentManager): void {
   server.tool(
     "batch_query",
     `Execute multiple D365 OData queries in parallel, returning all results in a single response.
@@ -373,11 +427,13 @@ Example:
       stopOnError: z.boolean().optional().default(false).describe(
         "Stop execution on first failure (default: false - continue with remaining queries)"
       ),
+      environment: environmentSchema,
     },
     async (
-      { queries, stopOnError },
+      { queries, stopOnError, environment },
       extra: RequestHandlerExtra<ServerRequest, ServerNotification>
     ) => {
+      const client = envManager.getClient(environment);
       const progress = new ProgressReporter(server, "batch_query", extra.sessionId);
       const startTime = Date.now();
 

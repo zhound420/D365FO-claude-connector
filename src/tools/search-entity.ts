@@ -7,9 +7,11 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
+import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import { ProgressReporter } from "../progress.js";
+import { environmentSchema } from "./common.js";
 
 /**
  * Default values for search
@@ -239,7 +241,7 @@ function formatSearchResults(
 /**
  * Register the search_entity tool
  */
-export function registerSearchEntityTool(server: McpServer, client: D365Client): void {
+export function registerSearchEntityTool(server: McpServer, envManager: EnvironmentManager): void {
   server.tool(
     "search_entity",
     `Search for records in a D365 entity with automatic fallback strategies.
@@ -262,11 +264,13 @@ Examples:
       searchField: z.string().describe("Field to search in (e.g., 'CustomerName')"),
       select: z.array(z.string()).optional().describe("Fields to return in results"),
       top: z.number().optional().default(DEFAULT_TOP).describe(`Maximum results to return (default: ${DEFAULT_TOP})`),
+      environment: environmentSchema,
     },
     async (
-      { entity, searchTerm, searchField, select, top },
+      { entity, searchTerm, searchField, select, top, environment },
       extra: RequestHandlerExtra<ServerRequest, ServerNotification>
     ) => {
+      const client = envManager.getClient(environment);
       const startTime = Date.now();
       const progress = new ProgressReporter(server, "search_entity", extra.sessionId);
 

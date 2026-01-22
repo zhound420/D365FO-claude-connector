@@ -174,3 +174,63 @@ export interface MetadataCacheEntry {
  * Transport mode for MCP server
  */
 export type TransportMode = "stdio" | "http";
+
+/**
+ * Environment type - determines read/write permissions
+ */
+export type EnvironmentType = "production" | "non-production";
+
+/**
+ * Configuration for a single D365 environment
+ */
+export interface EnvironmentConfig {
+  name: string;
+  displayName: string;
+  type: EnvironmentType;
+  tenantId: string;
+  clientId: string;
+  clientSecret: string;
+  environmentUrl: string;
+  default?: boolean;
+}
+
+/**
+ * Multi-environment configuration file structure
+ */
+export interface EnvironmentsConfig {
+  environments: EnvironmentConfig[];
+}
+
+/**
+ * Write operation request data
+ */
+export interface WriteOperationData {
+  [key: string]: unknown;
+}
+
+/**
+ * Result of a create operation
+ */
+export interface CreateRecordResult {
+  success: boolean;
+  record?: Record<string, unknown>;
+  etag?: string;
+  error?: string;
+}
+
+/**
+ * Result of an update operation
+ */
+export interface UpdateRecordResult {
+  success: boolean;
+  etag?: string;
+  error?: string;
+}
+
+/**
+ * Result of a delete operation
+ */
+export interface DeleteRecordResult {
+  success: boolean;
+  error?: string;
+}

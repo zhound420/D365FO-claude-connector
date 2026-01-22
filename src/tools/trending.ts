@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
+import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import {
@@ -14,16 +15,64 @@ import {
   generatePeriodStarts,
   buildDateFilter,
   parseDate,
-  formatDate,
   addDays,
-  addWeeks,
   addMonths,
   addQuarters,
   addYears,
-  startOfDay,
   endOfDay,
 } from "../utils/date-utils.js";
 import { formatTiming } from "../progress.js";
+import { environmentSchema } from "./common.js";
+
+/**
+ * Timeout for paginated requests (60 seconds - longer than default 30s)
+ */
+const PAGINATION_TIMEOUT_MS = parseInt(process.env.D365_PAGINATION_TIMEOUT_MS || "60000", 10);
+
+/**
+ * Maximum retries for individual page fetches within pagination
+ */
+const PAGE_FETCH_MAX_RETRIES = 2;
+
+/**
+ * Sleep helper for retry backoff
+ */
+function sleepMs(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetch a single page with retry logic for pagination operations.
+ */
+async function fetchPageWithRetry<T>(
+  client: D365Client,
+  url: string,
+  maxRetries: number = PAGE_FETCH_MAX_RETRIES
+): Promise<T> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await client.request<T>(url, {}, PAGINATION_TIMEOUT_MS);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+
+      if (error instanceof D365Error) {
+        if (error.statusCode === 401 || error.statusCode === 403 ||
+            error.statusCode === 404 || error.statusCode === 400) {
+          throw error;
+        }
+      }
+
+      if (attempt < maxRetries) {
+        const backoffMs = 2000 * Math.pow(2, attempt);
+        await sleepMs(backoffMs);
+      }
+    }
+  }
+
+  throw lastError || new Error("Page fetch failed after retries");
+}
 
 /**
  * Aggregation function types
@@ -292,7 +341,7 @@ function formatTrendingResults(
 /**
  * Register the trending tool
  */
-export function registerTrendingTool(server: McpServer, client: D365Client): void {
+export function registerTrendingTool(server: McpServer, envManager: EnvironmentManager): void {
   server.tool(
     "trending",
     `Time series analysis with aggregation, growth rates, moving averages, and year-over-year comparison.
@@ -334,8 +383,10 @@ Examples:
       compareYoY: z.boolean().optional().default(false).describe(
         "Include year-over-year comparison (compares each period to same period last year)"
       ),
+      environment: environmentSchema,
     },
-    async ({ entity, dateField, valueField, aggregation, granularity, periods, endDate, filter, movingAverageWindow, includeGrowthRate, compareYoY }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ entity, dateField, valueField, aggregation, granularity, periods, endDate, filter, movingAverageWindow, includeGrowthRate, compareYoY, environment }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+      const client = envManager.getClient(environment);
       try {
         const startTime = Date.now();
         const aggFunc = aggregation as AggregationFunction;
@@ -384,12 +435,12 @@ Examples:
           buckets.set(key, createStreamingState());
         }
 
-        // Fetch and bucket records
+        // Fetch and bucket records with retry logic for large datasets
         let nextLink: string | undefined = path;
         let recordsProcessed = 0;
 
         while (nextLink) {
-          const response: ODataResponse<Record<string, unknown>> = await client.request(nextLink);
+          const response: ODataResponse<Record<string, unknown>> = await fetchPageWithRetry(client, nextLink);
 
           if (response.value && Array.isArray(response.value)) {
             for (const record of response.value) {
@@ -468,12 +519,12 @@ Examples:
               priorYearBuckets.set(key, createStreamingState());
             }
 
-            // Fetch prior year data
+            // Fetch prior year data with retry logic
             let priorYearPath = `/${entity}?$select=${encodeURIComponent(Array.from(fieldsNeeded).join(","))}&$filter=${encodeURIComponent(priorYearCombinedFilter)}`;
             let priorYearNextLink: string | undefined = priorYearPath;
 
             while (priorYearNextLink) {
-              const response: ODataResponse<Record<string, unknown>> = await client.request(priorYearNextLink);
+              const response: ODataResponse<Record<string, unknown>> = await fetchPageWithRetry(client, priorYearNextLink);
 
               if (response.value && Array.isArray(response.value)) {
                 for (const record of response.value) {

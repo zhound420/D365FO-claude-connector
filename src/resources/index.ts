@@ -3,7 +3,7 @@
  */
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { MetadataCache } from "../metadata-cache.js";
+import type { EnvironmentManager } from "../environment-manager.js";
 import { registerEntitiesResource } from "./entities.js";
 import { registerEntityTemplateResource } from "./entity.js";
 import { registerEnumsResource } from "./enums.js";
@@ -12,8 +12,12 @@ import { registerNavigationResource } from "./navigation.js";
 
 /**
  * Register all D365 resources with the MCP server
+ * Resources use the default environment's metadata cache
  */
-export function registerAllResources(server: McpServer, metadataCache: MetadataCache): void {
+export function registerAllResources(server: McpServer, envManager: EnvironmentManager): void {
+  // Get the default environment's metadata cache
+  const metadataCache = envManager.getMetadataCache();
+
   // Entities list resource: d365://entities?filter=<pattern>
   registerEntitiesResource(server, metadataCache);
 

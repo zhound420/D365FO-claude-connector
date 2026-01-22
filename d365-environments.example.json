@@ -1,0 +1,32 @@
+{
+  "environments": [
+    {
+      "name": "production",
+      "displayName": "Production",
+      "type": "production",
+      "tenantId": "your-tenant-id-here",
+      "clientId": "your-client-id-here",
+      "clientSecret": "your-client-secret-here",
+      "environmentUrl": "https://your-company.operations.dynamics.com",
+      "default": true
+    },
+    {
+      "name": "uat",
+      "displayName": "UAT (Tier 2)",
+      "type": "non-production",
+      "tenantId": "your-tenant-id-here",
+      "clientId": "your-client-id-here",
+      "clientSecret": "your-client-secret-here",
+      "environmentUrl": "https://your-company-uat.sandbox.operations.dynamics.com"
+    },
+    {
+      "name": "dev",
+      "displayName": "Dev Sandbox",
+      "type": "non-production",
+      "tenantId": "your-tenant-id-here",
+      "clientId": "your-client-id-here",
+      "clientSecret": "your-client-secret-here",
+      "environmentUrl": "https://your-company-dev.sandbox.operations.dynamics.com"
+    }
+  ]
+}

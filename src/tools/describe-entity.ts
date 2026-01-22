@@ -6,19 +6,22 @@ import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
-import type { MetadataCache } from "../metadata-cache.js";
+import type { EnvironmentManager } from "../environment-manager.js";
+import { environmentSchema } from "./common.js";
 
 /**
  * Register the describe_entity tool
  */
-export function registerDescribeEntityTool(server: McpServer, metadataCache: MetadataCache): void {
+export function registerDescribeEntityTool(server: McpServer, envManager: EnvironmentManager): void {
   server.tool(
     "describe_entity",
     "Get the full schema definition for a D365 entity including all fields, their types, keys, and navigation properties. Use this to understand an entity's structure before querying it.",
     {
       entity: z.string().describe("The exact name of the entity to describe (e.g., 'CustomersV3', 'SalesOrderHeaders')"),
+      environment: environmentSchema,
     },
-    async ({ entity }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+    async ({ entity, environment }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
+      const metadataCache = envManager.getMetadataCache(environment);
       try {
         const definition = await metadataCache.getEntityDefinition(entity);
 

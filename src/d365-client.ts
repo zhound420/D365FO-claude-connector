@@ -398,4 +398,126 @@ export class D365Client {
       .map(([field, value]) => `${field}='${this.escapeODataString(value)}'`)
       .join(",");
   }
+
+  /**
+   * Create a new record in an entity (POST)
+   * Returns the created record with server-generated fields
+   */
+  async createRecord<T = Record<string, unknown>>(
+    entityName: string,
+    data: Record<string, unknown>
+  ): Promise<{ record: T; etag?: string }> {
+    const path = `/${entityName}`;
+
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${await this.tokenManager.getToken()}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "OData-MaxVersion": "4.0",
+        "OData-Version": "4.0",
+        Prefer: "return=representation",
+      },
+      body: JSON.stringify(data),
+    });
+
+    if (!response.ok) {
+      await this.handleErrorResponse(response);
+    }
+
+    const record = await response.json() as T;
+    const etag = response.headers.get("ETag") || undefined;
+
+    return { record, etag };
+  }
+
+  /**
+   * Update an existing record (PATCH)
+   * Supports optimistic concurrency with ETag
+   * Returns the new ETag after update
+   */
+  async updateRecord(
+    entityName: string,
+    key: string | Record<string, string>,
+    data: Record<string, unknown>,
+    etag?: string
+  ): Promise<{ etag?: string }> {
+    const keyString = this.formatKey(key);
+    const path = `/${entityName}(${keyString})`;
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${await this.tokenManager.getToken()}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "OData-MaxVersion": "4.0",
+      "OData-Version": "4.0",
+    };
+
+    // Add If-Match header for optimistic concurrency if ETag provided
+    if (etag) {
+      headers["If-Match"] = etag;
+    }
+
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify(data),
+    });
+
+    if (!response.ok) {
+      // Handle concurrency conflict
+      if (response.status === 412) {
+        throw new D365Error(
+          "Record was modified by another user. Refresh and try again.",
+          412
+        );
+      }
+      await this.handleErrorResponse(response);
+    }
+
+    const newEtag = response.headers.get("ETag") || undefined;
+    return { etag: newEtag };
+  }
+
+  /**
+   * Delete a record (DELETE)
+   * Supports optimistic concurrency with ETag
+   */
+  async deleteRecord(
+    entityName: string,
+    key: string | Record<string, string>,
+    etag?: string
+  ): Promise<void> {
+    const keyString = this.formatKey(key);
+    const path = `/${entityName}(${keyString})`;
+
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${await this.tokenManager.getToken()}`,
+      Accept: "application/json",
+      "OData-MaxVersion": "4.0",
+      "OData-Version": "4.0",
+    };
+
+    // Add If-Match header for optimistic concurrency if ETag provided
+    if (etag) {
+      headers["If-Match"] = etag;
+    }
+
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      method: "DELETE",
+      headers,
+    });
+
+    if (!response.ok) {
+      // Handle concurrency conflict
+      if (response.status === 412) {
+        throw new D365Error(
+          "Record was modified by another user. Refresh and try again.",
+          412
+        );
+      }
+      await this.handleErrorResponse(response);
+    }
+  }
 }
