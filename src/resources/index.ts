@@ -9,6 +9,7 @@ import { registerEntityTemplateResource } from "./entity.js";
 import { registerEnumsResource } from "./enums.js";
 import { registerQueriesResource } from "./queries.js";
 import { registerNavigationResource } from "./navigation.js";
+import { registerDashboardResource } from "./dashboard.js";
 
 /**
  * Register all D365 resources with the MCP server
@@ -32,4 +33,7 @@ export function registerAllResources(server: McpServer, envManager: EnvironmentM
 
   // Navigation properties resource: d365://navigation/{entityName}
   registerNavigationResource(server, metadataCache);
+
+  // Dashboard resource: d365://dashboard (JSON metrics for all environments)
+  registerDashboardResource(server, envManager);
 }

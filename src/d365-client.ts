@@ -13,6 +13,11 @@ import { TokenManager } from "./auth.js";
 import { log, logError } from "./config.js";
 
 /**
+ * Callback type for metrics collection
+ */
+export type MetricsCallback = (latencyMs: number, success: boolean) => void;
+
+/**
  * Custom error class for D365 API errors
  */
 export class D365Error extends Error {
@@ -70,11 +75,20 @@ export class D365Client {
   private config: D365Config;
   private tokenManager: TokenManager;
   private baseUrl: string;
+  private metricsCallback?: MetricsCallback;
 
   constructor(config: D365Config) {
     this.config = config;
     this.tokenManager = new TokenManager(config);
     this.baseUrl = `${config.environmentUrl}/data`;
+  }
+
+  /**
+   * Set a callback for metrics collection
+   * Called after each request with latency and success status
+   */
+  setMetricsCallback(callback: MetricsCallback): void {
+    this.metricsCallback = callback;
   }
 
   /**
@@ -89,6 +103,7 @@ export class D365Client {
     const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
     const correlationId = generateCorrelationId();
     let lastError: Error | null = null;
+    const requestStartTime = Date.now();
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
@@ -131,8 +146,13 @@ export class D365Client {
               await sleep(retryDelay);
               continue;
             }
+            // Record failed request in metrics before throwing
+            this.recordMetrics(requestStartTime, false);
             await this.handleErrorResponse(response);
           }
+
+          // Record successful request in metrics
+          this.recordMetrics(requestStartTime, true);
 
           // Handle empty responses (e.g., 204 No Content)
           if (response.status === 204) {
@@ -177,8 +197,19 @@ export class D365Client {
       }
     }
 
-    // All retries exhausted
+    // All retries exhausted - record failure in metrics
+    this.recordMetrics(requestStartTime, false);
     throw lastError || new D365Error(`Request failed after all retries [${correlationId}]`, 0);
+  }
+
+  /**
+   * Record metrics for a completed request
+   */
+  private recordMetrics(startTime: number, success: boolean): void {
+    if (this.metricsCallback) {
+      const latencyMs = Date.now() - startTime;
+      this.metricsCallback(latencyMs, success);
+    }
   }
 
   /**
