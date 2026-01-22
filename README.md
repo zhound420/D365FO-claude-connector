@@ -342,15 +342,19 @@ return {
 
 ## Tips for Best Results
 
-1. **Be specific about entities** - D365 has many similarly named entities (e.g., `Customers`, `CustomersV3`, `CustCustomerV3`). Ask Claude to list available entities if unsure.
+1. **Ask business questions directly** - The MCP tools handle complexity for you. Just ask: "Who are our top 20 customers by spend?" or "How did Q4 compare to Q3?"
 
-2. **Mention field names** - If you know the field names, include them: "Get CustomerAccount and CustomerName from CustomersV3"
+2. **Use natural date formats** - Claude understands "last month", "Q4 2024", "past 12 months", or specific dates like "January 1, 2024"
 
-3. **Use natural date formats** - "Orders from last month" or "Orders after January 1, 2024"
+3. **Don't worry about special characters** - Searching for "S&S Industries" or "O'Brien Corp" works automatically. The tools have fallback strategies for characters that break standard OData.
 
-4. **Ask for counts first** - Before fetching large datasets, ask "How many records are in X?" to understand the data volume.
+4. **Request trends and comparisons** - Built-in time intelligence handles the complexity: "Show monthly sales trend with growth rates" or "Compare this year's revenue to last year"
 
-5. **Request explanations** - Ask Claude to explain what query it's running: "Show me customers in group US and explain the OData query you're using"
+5. **Combine multiple questions** - Ask for dashboard-style views: "Get me total customers, orders this month, and top 5 products" - queries run in parallel.
+
+6. **Export data when needed** - Request CSV, JSON, or TSV exports directly: "Export all customers with credit limit over $100K to CSV"
+
+7. **Ask for explanations** - If you want to learn OData syntax, ask Claude to explain the query: "Show customers in group US and explain the OData query"
 
 ## API Reference
 
