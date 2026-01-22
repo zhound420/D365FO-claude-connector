@@ -13,6 +13,14 @@ import {
   toD365Config,
 } from "./config-loader.js";
 import { log } from "./config.js";
+import {
+  MetricsTracker,
+  HealthChecker,
+  type EnvironmentMetrics,
+  type DashboardData,
+  type OperationLogEntry,
+  createUnknownHealth,
+} from "./metrics/index.js";
 
 /**
  * Custom error for write operation violations
@@ -89,6 +97,13 @@ export class EnvironmentManager {
     if (!this.clients.has(env.name)) {
       log(`Creating client for environment: ${env.name} (${env.displayName})`);
       const client = new D365Client(toD365Config(env));
+
+      // Wire up metrics tracking
+      const envName = env.name;
+      client.setMetricsCallback((latencyMs, success) => {
+        MetricsTracker.recordApiCall(envName, latencyMs, success);
+      });
+
       this.clients.set(env.name, client);
     }
 
@@ -203,5 +218,65 @@ export class EnvironmentManager {
       }
     });
     await Promise.all(promises);
+  }
+
+  /**
+   * Record an operation in the metrics tracker
+   */
+  recordOperation(environmentName: string | undefined, entry: OperationLogEntry): void {
+    const env = this.getEnvironmentConfig(environmentName);
+    MetricsTracker.recordOperation(env.name, entry);
+  }
+
+  /**
+   * Get metrics for a specific environment
+   */
+  async getEnvironmentMetrics(environmentName?: string, checkHealth: boolean = false): Promise<EnvironmentMetrics> {
+    const env = this.getEnvironmentConfig(environmentName);
+    const client = this.getClient(environmentName);
+
+    // Get health status (from cache or perform check)
+    const health = checkHealth
+      ? await HealthChecker.checkHealth(client, env.name)
+      : HealthChecker.getCachedHealth(env.name);
+
+    return {
+      name: env.name,
+      displayName: env.displayName,
+      type: env.type,
+      environmentUrl: env.environmentUrl,
+      isDefault: env.default || false,
+      health,
+      apiStats: MetricsTracker.getStats(env.name),
+      recentOperations: MetricsTracker.getRecentOperations(env.name, 10),
+    };
+  }
+
+  /**
+   * Get complete dashboard data for all environments
+   */
+  async getDashboardData(checkHealth: boolean = true): Promise<DashboardData> {
+    const environments: EnvironmentMetrics[] = [];
+
+    for (const env of this.config.environments) {
+      const metrics = await this.getEnvironmentMetrics(env.name, checkHealth);
+      environments.push(metrics);
+    }
+
+    return {
+      generatedAt: new Date(),
+      environments,
+      serverVersion: "3.0.0", // Could be read from package.json if needed
+      serverUptime: MetricsTracker.getUptime(),
+    };
+  }
+
+  /**
+   * Force a health check for an environment
+   */
+  async checkEnvironmentHealth(environmentName?: string): Promise<void> {
+    const env = this.getEnvironmentConfig(environmentName);
+    const client = this.getClient(environmentName);
+    await HealthChecker.forceCheck(client, env.name);
   }
 }

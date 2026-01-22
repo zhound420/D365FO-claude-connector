@@ -20,6 +20,7 @@ import { registerListEnvironmentsTool } from "./list-environments.js";
 import { registerCreateRecordTool } from "./create-record.js";
 import { registerUpdateRecordTool } from "./update-record.js";
 import { registerDeleteRecordTool } from "./delete-record.js";
+import { registerDashboardTool } from "./dashboard.js";
 
 /**
  * Register all D365 tools with the MCP server
@@ -43,6 +44,7 @@ import { registerDeleteRecordTool } from "./delete-record.js";
  * - create_record: Create new records (non-production only)
  * - update_record: Update existing records (non-production only)
  * - delete_record: Delete records (non-production only)
+ * - dashboard: Display comprehensive environment dashboard with health and metrics
  *
  * All tools support an optional 'environment' parameter to target specific environments.
  */
@@ -93,4 +95,7 @@ export function registerAllTools(
   registerCreateRecordTool(server, envManager);
   registerUpdateRecordTool(server, envManager);
   registerDeleteRecordTool(server, envManager);
+
+  // Dashboard tool: Environment status and metrics
+  registerDashboardTool(server, envManager);
 }
