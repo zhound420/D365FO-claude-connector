@@ -16,7 +16,7 @@ import {
   getBucketKey,
   generatePeriodStarts,
 } from "../utils/date-utils.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Default values
@@ -365,8 +365,14 @@ async function getMonthlyTrend(
 /**
  * Format analysis results for output
  */
-function formatAnalysisResults(result: AnalysisResult, elapsedMs: number): string {
+function formatAnalysisResults(result: AnalysisResult, elapsedMs: number, envHeader?: string): string {
   const lines: string[] = [];
+
+  // Environment header
+  if (envHeader) {
+    lines.push(envHeader);
+    lines.push("");
+  }
 
   // Customer Profile
   lines.push("# Customer Analysis Report");
@@ -487,6 +493,7 @@ Examples:
       extra: RequestHandlerExtra<ServerRequest, ServerNotification>
     ) => {
       const client = envManager.getClient(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
       const startTime = Date.now();
       const progress = new ProgressReporter(server, "analyze_customer", extra.sessionId);
 
@@ -562,7 +569,8 @@ Examples:
         };
 
         const elapsedMs = Date.now() - startTime;
-        const output = formatAnalysisResults(result, elapsedMs);
+        const envHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
+        const output = formatAnalysisResults(result, elapsedMs, envHeader);
 
         return {
           content: [

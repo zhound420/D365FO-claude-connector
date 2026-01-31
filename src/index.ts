@@ -34,20 +34,37 @@ import { EnvironmentManager } from "./environment-manager.js";
 import { registerAllResources } from "./resources/index.js";
 import { registerAllTools } from "./tools/index.js";
 
-const SERVER_NAME = "Microsoft D365";
 const SERVER_VERSION = "3.0.0";
+
+/**
+ * Generate dynamic server name based on environment configuration
+ */
+function getServerName(envManager: EnvironmentManager): string {
+  const environments = envManager.getEnvironments();
+  const isSingleEnvMode = environments.length === 1;
+
+  if (isSingleEnvMode) {
+    const env = environments[0];
+    const emoji = env.type === "production" ? "🔴" : "🟢";
+    return `D365 ${env.displayName} ${emoji}`;
+  }
+
+  return "Microsoft D365";
+}
 
 /**
  * Create and configure the MCP server
  */
-async function createServer(): Promise<{ server: McpServer; envManager: EnvironmentManager }> {
+async function createServer(): Promise<{ server: McpServer; envManager: EnvironmentManager; serverName: string }> {
+  // Initialize environment manager first (loads all environment configs)
+  const envManager = new EnvironmentManager();
+
+  // Create server with dynamic name based on environment
+  const serverName = getServerName(envManager);
   const server = new McpServer({
-    name: SERVER_NAME,
+    name: serverName,
     version: SERVER_VERSION,
   });
-
-  // Initialize environment manager (loads all environment configs)
-  const envManager = new EnvironmentManager();
 
   // Log configured environments
   const environments = envManager.getEnvironments();
@@ -79,7 +96,7 @@ async function createServer(): Promise<{ server: McpServer; envManager: Environm
   // Register tools (for actions)
   registerAllTools(server, envManager);
 
-  return { server, envManager };
+  return { server, envManager, serverName };
 }
 
 /**
@@ -94,7 +111,7 @@ async function startStdioServer(server: McpServer): Promise<void> {
 /**
  * Start the server with HTTP transport (for web/remote access)
  */
-async function startHttpServer(server: McpServer): Promise<void> {
+async function startHttpServer(server: McpServer, serverName: string): Promise<void> {
   const port = getHttpPort();
   const app = express();
 
@@ -102,7 +119,7 @@ async function startHttpServer(server: McpServer): Promise<void> {
 
   // Health check endpoint
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", server: SERVER_NAME, version: SERVER_VERSION });
+    res.json({ status: "ok", server: serverName, version: SERVER_VERSION });
   });
 
   // MCP endpoint - handles JSON-RPC messages
@@ -188,14 +205,14 @@ function setupGracefulShutdown(server: McpServer): void {
  */
 async function main(): Promise<void> {
   try {
-    const { server } = await createServer();
+    const { server, serverName } = await createServer();
     const transportMode = getTransportMode();
 
     // Setup graceful shutdown handlers
     setupGracefulShutdown(server);
 
     if (transportMode === "http") {
-      await startHttpServer(server);
+      await startHttpServer(server, serverName);
     } else {
       await startStdioServer(server);
     }

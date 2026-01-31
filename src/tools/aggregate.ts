@@ -12,7 +12,7 @@ import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import { formatTiming, ProgressReporter } from "../progress.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Timeout for paginated requests (60 seconds - longer than default 30s)
@@ -447,9 +447,16 @@ function finalizeStreamingResults(
 function formatAccurateModeResult(
   results: AggregationResult[],
   groupBy: string[] | undefined,
-  progress: AccurateModeProgress
+  progress: AccurateModeProgress,
+  envHeader?: string
 ): string {
   const lines: string[] = [];
+
+  // Environment header
+  if (envHeader) {
+    lines.push(envHeader);
+    lines.push("");
+  }
 
   // Header with progress info
   if (progress.isPartial) {
@@ -787,9 +794,16 @@ function formatAggregationResult(
   results: AggregationResult[],
   groupBy?: string[],
   method: "server" | "client" = "server",
-  recordCount?: number
+  recordCount?: number,
+  envHeader?: string
 ): string {
   const lines: string[] = [];
+
+  // Environment header
+  if (envHeader) {
+    lines.push(envHeader);
+    lines.push("");
+  }
 
   // Header
   if (groupBy && groupBy.length > 0) {
@@ -977,9 +991,16 @@ function formatSamplingResult(
   groupBy: string[] | undefined,
   sampleSize: number,
   totalCount: number,
-  elapsedMs: number
+  elapsedMs: number,
+  envHeader?: string
 ): string {
   const lines: string[] = [];
+
+  // Environment header
+  if (envHeader) {
+    lines.push(envHeader);
+    lines.push("");
+  }
 
   lines.push("⚡ ESTIMATED RESULTS (Sampling Mode)");
   lines.push(`Sample: ${sampleSize.toLocaleString()} of ${totalCount.toLocaleString()} records (${((sampleSize / totalCount) * 100).toFixed(1)}%)`);
@@ -1076,6 +1097,8 @@ Examples:
     },
     async ({ entity, aggregations, filter, groupBy, maxRecords, accurate, sampling, orderBy, top, environment }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       const client = envManager.getClient(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
+      const envHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
       try {
         const startTime = Date.now();
         const progressReporter = new ProgressReporter(server, "aggregate", extra.sessionId);
@@ -1098,7 +1121,7 @@ Examples:
               content: [
                 {
                   type: "text",
-                  text: `Aggregation Results\nMethod: Server-side (/$count)${timing}\n\n${alias}: ${count.toLocaleString()}`,
+                  text: `${envHeader}\n\nAggregation Results\nMethod: Server-side (/$count)${timing}\n\n${alias}: ${count.toLocaleString()}`,
                 },
               ],
             };
@@ -1134,7 +1157,7 @@ Examples:
             // Apply sorting and limiting
             const sortedResults = applySortingAndLimiting(results, orderBy, top);
 
-            const output = formatSamplingResult(sortedResults, groupBy, sampleSize, totalCount, elapsedMs);
+            const output = formatSamplingResult(sortedResults, groupBy, sampleSize, totalCount, elapsedMs, envHeader);
 
             return {
               content: [
@@ -1163,7 +1186,7 @@ Examples:
           // Apply sorting and limiting
           const sortedResults = applySortingAndLimiting(results, orderBy, top);
 
-          const output = formatAccurateModeResult(sortedResults, groupBy, progress);
+          const output = formatAccurateModeResult(sortedResults, groupBy, progress, envHeader);
 
           return {
             content: [
@@ -1204,7 +1227,7 @@ Examples:
         // Apply sorting and limiting
         const sortedResults = applySortingAndLimiting(results, orderBy, top);
 
-        const output = formatAggregationResult(sortedResults, groupBy, "client", records.length);
+        const output = formatAggregationResult(sortedResults, groupBy, "client", records.length, envHeader);
 
         return {
           content: [

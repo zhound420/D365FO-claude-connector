@@ -10,7 +10,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Storage path for saved queries
@@ -274,6 +274,7 @@ Examples:
     },
     async ({ name, params, fetchAll, maxRecords, environment }) => {
       const client = envManager.getClient(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
       try {
         const queries = loadSavedQueries();
         const query = queries[name];
@@ -340,6 +341,8 @@ Examples:
           }
 
           const lines: string[] = [];
+          lines.push(formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production"));
+          lines.push("");
           lines.push(`Executed saved query: ${name}`);
           if (query.description) {
             lines.push(`Description: ${query.description}`);
@@ -371,6 +374,8 @@ Examples:
         const response: ODataResponse = await client.request(path);
 
         const lines: string[] = [];
+        lines.push(formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production"));
+        lines.push("");
         lines.push(`Executed saved query: ${name}`);
         if (query.description) {
           lines.push(`Description: ${query.description}`);

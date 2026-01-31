@@ -8,8 +8,8 @@ An MCP (Model Context Protocol) server that provides access to Microsoft Dynamic
 - **Read/Write Operations** - Query data on all environments; create, update, delete on non-production only
 - **Production Safety** - Production environments are always read-only by design
 - **MCP Resources** for schema discovery and metadata exploration
-- **Consolidated Tools** for flexible data access
-- **Sandboxed JavaScript Execution** for complex operations with D365 API access
+- **20+ Specialized Tools** for flexible data access, aggregation, and analysis
+- **Environment Dashboard** - Health monitoring, API statistics, and operation tracking
 - **Secure Authentication** via Azure AD client credentials
 - **Automatic Metadata Caching** (24-hour TTL, per-environment)
 
@@ -21,6 +21,7 @@ An MCP (Model Context Protocol) server that provides access to Microsoft Dynamic
 |----------|-----|---------|
 | Entities List | `d365://entities?filter=<pattern>` | List all entities with optional wildcard filtering |
 | Entity Schema | `d365://entity/{entityName}` | Full schema for any entity (fields, keys, navigation properties) |
+| Navigation Properties | `d365://navigation/{entityName}` | Entity relationships and navigation properties |
 | Enum Definitions | `d365://enums` | All enum types with their values |
 | Saved Queries | `d365://queries` | List saved query templates |
 | Dashboard | `d365://dashboard` | JSON metrics for all environments (health, API stats, recent operations) |
@@ -32,10 +33,10 @@ All tools support an optional `environment` parameter to target specific D365 en
 | Tool | Purpose |
 |------|---------|
 | `list_environments` | List all configured D365 environments with connection status |
+| `set_environment` | Set the working environment for the current session |
 | `describe_entity` | Quick schema lookup for an entity |
 | `execute_odata` | Execute raw OData paths (queries, single records, counts) |
-| `execute_code` | Run JavaScript in a secure sandbox with D365 API access |
-| `aggregate` | Perform aggregations (SUM, AVG, COUNT, MIN, MAX) on entity data |
+| `aggregate` | Perform aggregations (SUM, AVG, COUNT, MIN, MAX, COUNTDISTINCT, percentiles) on entity data |
 | `get_related` | Follow entity relationships to retrieve related records |
 | `export` | Export query results to CSV, JSON, or TSV format |
 | `compare_periods` | YoY, QoQ, MoM period comparisons with change calculations |
@@ -65,6 +66,23 @@ npm install
 # Build
 npm run build
 ```
+
+## Quick Start (Recommended)
+
+Run the interactive setup wizard:
+
+```bash
+npm run setup
+```
+
+The wizard will:
+1. Check prerequisites (Node.js 18+, dependencies)
+2. Guide you through D365 environment configuration
+3. Test connectivity to your D365 environments
+4. Generate configuration files
+5. Configure Claude Desktop and/or Claude Code
+
+After setup, restart Claude Desktop (Cmd+Q then reopen on macOS, or Ctrl+Q on Windows) or start a new Claude Code session.
 
 ## Configuration
 
@@ -190,6 +208,81 @@ Add to `~/.claude/settings.json`:
 ```
 
 After adding the configuration, restart Claude Desktop or Claude Code.
+
+### Environment Visibility Configuration
+
+When using multiple D365 environments, you can configure how they appear in Claude:
+
+#### Option A: Separate Servers per Environment (Recommended)
+
+This option shows each environment as a separate MCP server in Claude's sidebar:
+
+```json
+{
+  "mcpServers": {
+    "D365-production": {
+      "command": "node",
+      "args": ["/path/to/d365fo-mcp-server/dist/index.js"],
+      "env": {
+        "D365_CONFIG_FILE": "/path/to/d365fo-mcp-server/d365-environments.json",
+        "D365_SINGLE_ENV": "production"
+      }
+    },
+    "D365-uat": {
+      "command": "node",
+      "args": ["/path/to/d365fo-mcp-server/dist/index.js"],
+      "env": {
+        "D365_CONFIG_FILE": "/path/to/d365fo-mcp-server/d365-environments.json",
+        "D365_SINGLE_ENV": "uat"
+      }
+    },
+    "D365-dev": {
+      "command": "node",
+      "args": ["/path/to/d365fo-mcp-server/dist/index.js"],
+      "env": {
+        "D365_CONFIG_FILE": "/path/to/d365fo-mcp-server/d365-environments.json",
+        "D365_SINGLE_ENV": "dev"
+      }
+    }
+  }
+}
+```
+
+**Pros:**
+- Environment is immediately visible in Claude's sidebar
+- No ambiguity about which environment a query targets
+- Works reliably across all platforms
+
+**How it works:** The `D365_SINGLE_ENV` environment variable tells the server to load only that specific environment from `d365-environments.json`. The `D365_CONFIG_FILE` ensures the config is found regardless of working directory.
+
+#### Option B: Single Multi-Environment Server
+
+Use a single server with an `environment` parameter on each query:
+
+```json
+{
+  "mcpServers": {
+    "d365": {
+      "command": "node",
+      "args": ["/path/to/d365fo-mcp-server/dist/index.js"],
+      "env": {
+        "D365_CONFIG_FILE": "/path/to/d365fo-mcp-server/d365-environments.json"
+      }
+    }
+  }
+}
+```
+
+Then specify the environment in queries:
+```json
+{ "entity": "CustomersV3", "top": 10, "environment": "uat" }
+```
+
+**Pros:**
+- Single server process
+- Flexibility to query any environment in one session
+
+The interactive setup script (`node setup.js`) can generate either configuration for you.
 
 ## Talking to Claude - Example Prompts
 
@@ -372,33 +465,7 @@ Claude will use `export` with format and filter:
 
 > **You:** What are the possible values for sales order status?
 
-Claude will check the `d365://enums` resource or use `execute_code` with `d365.getEnum('SalesOrderStatus')`.
-
-### Complex Custom Analysis
-
-> **You:** Compare the average credit limits between US and EU customer groups
-
-For complex logic that doesn't fit built-in tools, Claude will use `execute_code`:
-```javascript
-const customers = await d365.query('CustomersV3', {
-  $filter: "CustomerGroup eq 'US' or CustomerGroup eq 'EU'",
-  $select: 'CustomerGroup,CreditLimit'
-});
-
-const groups = { US: [], EU: [] };
-for (const c of customers) {
-  if (groups[c.CustomerGroup]) {
-    groups[c.CustomerGroup].push(c.CreditLimit || 0);
-  }
-}
-
-const avg = arr => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-
-return {
-  US: { count: groups.US.length, avgCreditLimit: avg(groups.US) },
-  EU: { count: groups.EU.length, avgCreditLimit: avg(groups.EU) }
-};
-```
+Claude will check the `d365://enums` resource to find enum definitions.
 
 ## Tips for Best Results
 
@@ -450,6 +517,21 @@ d365://entity/SalesOrderHeaders
 - All fields with types, constraints, and enum references
 - Navigation properties (relationships)
 
+#### `d365://navigation/{entityName}`
+
+Get navigation properties (relationships) for an entity.
+
+**Examples:**
+```
+d365://navigation/SalesOrderHeadersV2
+d365://navigation/CustomersV3
+```
+
+**Response includes:**
+- Navigation property names
+- Target entity types
+- Relationship cardinality (one-to-many, many-to-one)
+
 #### `d365://enums`
 
 List all enum type definitions.
@@ -459,6 +541,38 @@ List all enum type definitions.
 - All member values with their numeric codes
 
 ### Tools
+
+#### `list_environments`
+
+List all configured D365 environments with their connection status and permissions.
+
+**Parameters:**
+- None required
+
+**Example:**
+```json
+{}
+```
+
+**Response includes:**
+- Environment name and display name
+- Type (production/non-production)
+- Connection status
+- Read/write permissions
+
+#### `set_environment`
+
+Set the working environment for the current session. Subsequent tool calls will use this environment by default.
+
+**Parameters:**
+- `environment` (string, required): Name of the environment to set as active
+
+**Example:**
+```json
+{
+  "environment": "uat"
+}
+```
 
 #### `describe_entity`
 
@@ -500,68 +614,6 @@ Execute a raw OData path against D365.
 
 // With expansion
 { "path": "SalesOrderHeaders?$expand=SalesOrderLines&$top=3" }
-```
-
-#### `execute_code`
-
-Run JavaScript code in a secure sandbox with D365 API access.
-
-**Parameters:**
-- `code` (string, required): JavaScript code to execute
-- `description` (string, optional): Description of what the code does
-
-**Sandbox Environment:**
-- 128MB memory limit
-- 30 second timeout
-- No file system or network access (except D365 API)
-- `console.log/warn/error` captured in output
-
-**Available APIs:**
-
-```javascript
-// Query records
-const customers = await d365.query('CustomersV3', {
-  $filter: "CustomerGroup eq 'US'",
-  $select: 'CustomerAccount,CustomerName',
-  $top: 10
-});
-
-// Get single record
-const customer = await d365.get('CustomersV3', 'US-001');
-// Or with compound key:
-const customer = await d365.get('CustomersV3', {
-  DataAreaId: 'usmf',
-  CustomerAccount: 'US-001'
-});
-
-// Count records
-const count = await d365.count('CustomersV3');
-const filtered = await d365.count('CustomersV3', "CustomerGroup eq 'US'");
-
-// Get entity schema
-const schema = await d365.describe('CustomersV3');
-
-// Get enum definition
-const statusEnum = await d365.getEnum('SalesStatus');
-
-// Raw OData request
-const result = await d365.odata('CustomersV3?$top=5');
-```
-
-**Example - Complex Aggregation:**
-
-```javascript
-// Count customers by group
-const customers = await d365.query('CustomersV3', {
-  $select: 'CustomerGroup'
-});
-
-const counts = {};
-for (const c of customers) {
-  counts[c.CustomerGroup] = (counts[c.CustomerGroup] || 0) + 1;
-}
-
-return counts;
 ```
 
 #### `aggregate`
@@ -904,6 +956,26 @@ Resource that lists all saved query templates.
 - Each query's name, description, entity, and parameters
 - Usage instructions
 
+#### `dashboard`
+
+Display environment dashboard with health status, API statistics, and recent operations.
+
+**Parameters:**
+- `checkHealth` (boolean, optional): Perform live connectivity check (default: false)
+
+**Example:**
+```json
+{
+  "checkHealth": true
+}
+```
+
+**Response includes:**
+- Per-environment health status
+- API call statistics (total calls, success rate)
+- Recent operations log
+- Environment configuration summary
+
 ## OData Query Syntax
 
 ### Filter Examples
@@ -975,40 +1047,51 @@ npm start
 
 ```
 src/
-├── index.ts              # Entry point and server setup
-├── config.ts             # Configuration loading
-├── auth.ts               # Azure AD authentication
-├── d365-client.ts        # D365 OData API client
-├── metadata-cache.ts     # EDMX metadata parser and cache
-├── types.ts              # TypeScript type definitions
+├── index.ts                # Entry point and server setup
+├── config-loader.ts        # Configuration loading (JSON + env var fallback)
+├── environment-manager.ts  # Multi-environment management and write guards
+├── auth.ts                 # Azure AD OAuth2 authentication
+├── d365-client.ts          # D365 OData API client with read/write methods
+├── metadata-cache.ts       # EDMX metadata parser and cache (24h TTL)
+├── progress.ts             # Progress reporting for long operations
+├── types.ts                # TypeScript type definitions
+├── metrics/
+│   ├── index.ts            # Metrics module exports
+│   ├── metrics-tracker.ts  # API call statistics tracking
+│   ├── health-checker.ts   # Environment connectivity health checks
+│   └── operation-log.ts    # Operation history tracking
 ├── resources/
-│   ├── index.ts          # Resource registration
-│   ├── entities.ts       # d365://entities resource
-│   ├── entity.ts         # d365://entity/{name} resource
-│   ├── enums.ts          # d365://enums resource
-│   └── queries.ts        # d365://queries resource
-├── sandbox/
-│   ├── index.ts          # SandboxManager (isolated-vm)
-│   ├── d365-api.ts       # D365 API bindings for sandbox
-│   └── types.ts          # Sandbox type definitions
+│   ├── index.ts            # Resource registration
+│   ├── entities.ts         # d365://entities resource
+│   ├── entity.ts           # d365://entity/{name} resource
+│   ├── navigation.ts       # d365://navigation/{name} resource
+│   ├── enums.ts            # d365://enums resource
+│   ├── queries.ts          # d365://queries resource
+│   └── dashboard.ts        # d365://dashboard resource
 ├── utils/
-│   ├── date-utils.ts     # Date period calculations
-│   └── csv-utils.ts      # CSV/TSV formatting
+│   ├── date-utils.ts       # Date period calculations
+│   └── csv-utils.ts        # CSV/TSV formatting
 └── tools/
-    ├── index.ts          # Tool registration
+    ├── index.ts            # Tool registration
+    ├── common.ts           # Shared tool utilities
+    ├── list-environments.ts
+    ├── set-environment.ts
     ├── describe-entity.ts
     ├── execute-odata.ts
-    ├── execute-code.ts
     ├── aggregate.ts
-    ├── get-related.ts    # Relationship navigation
-    ├── export.ts         # CSV/JSON/TSV export
-    ├── compare-periods.ts # Period comparisons
-    ├── trending.ts       # Time series analysis
-    ├── saved-queries.ts  # Query templates
-    ├── join-entities.ts  # Cross-entity joins
-    ├── batch-query.ts    # Parallel query execution
-    ├── search-entity.ts  # Robust entity search
-    └── analyze-customer.ts # Customer analysis
+    ├── get-related.ts
+    ├── export.ts
+    ├── compare-periods.ts
+    ├── trending.ts
+    ├── saved-queries.ts    # save/execute/delete query templates
+    ├── join-entities.ts
+    ├── batch-query.ts
+    ├── search-entity.ts
+    ├── analyze-customer.ts
+    ├── create-record.ts    # Write operation (non-production only)
+    ├── update-record.ts    # Write operation (non-production only)
+    ├── delete-record.ts    # Write operation (non-production only)
+    └── dashboard.ts
 ```
 
 ## Write Operations (Non-Production Only)
@@ -1079,15 +1162,100 @@ Delete a record from an entity.
 }
 ```
 
-## Security Considerations
+## Security
+
+### Credential Protection
+
+This project implements multiple layers to protect your Azure AD credentials:
+
+| Protection | Description |
+|------------|-------------|
+| `.gitignore` | `.env` and `d365-environments.json` are excluded from version control |
+| `.gitattributes` | Sensitive files excluded from `git archive` exports |
+| Pre-commit hook | Scans staged files for secret patterns before allowing commits |
+| Sanitized errors | Azure AD error responses are logged internally but not exposed to callers |
+
+### Protected Files
+
+The following files contain credentials and are protected:
+
+- `.env` - Environment variables (legacy single-environment config)
+- `d365-environments.json` - Multi-environment configuration with secrets
+- `*.local.json` - Local configuration overrides
+
+**Safe files** (contain placeholders, OK to commit):
+- `.env.example` - Template with placeholder values
+- `d365-environments.example.json` - Example configuration
+
+### If Credentials Are Exposed
+
+If you accidentally commit or expose credentials:
+
+1. **Immediately rotate the Azure AD client secret:**
+   - Go to [Azure Portal](https://portal.azure.com) > Azure Active Directory > App registrations
+   - Select your D365 app registration
+   - Go to "Certificates & secrets"
+   - Create a new client secret
+   - Update your local `.env` or `d365-environments.json` with the new secret
+   - Delete the old secret from Azure AD
+
+2. **Review Azure AD sign-in logs:**
+   - Check for unauthorized access attempts
+   - Azure Portal > Azure AD > Sign-in logs > Filter by your app
+
+3. **If committed to git:**
+   - Even if you remove the secret in a new commit, it remains in git history
+   - Consider using `git filter-branch` or BFG Repo-Cleaner to purge history
+   - Force-push the cleaned repository (coordinate with collaborators)
+
+### Rotating Azure AD Secrets
+
+Best practice is to rotate secrets periodically (every 90-180 days):
+
+1. **Create new secret in Azure Portal** (before the old one expires)
+2. **Update your configuration files:**
+   ```bash
+   # Edit .env or d365-environments.json with new secret
+   ```
+3. **Test connectivity:**
+   ```bash
+   npm start  # Verify authentication works
+   ```
+4. **Delete old secret from Azure Portal**
+
+### Pre-commit Hook
+
+The pre-commit hook scans for patterns like:
+- Azure AD client secrets (30+ character strings after `clientSecret`)
+- Tenant IDs (UUID format after `tenantId`)
+- Environment variable assignments with secrets
+
+To bypass (for false positives only):
+```bash
+git commit --no-verify
+```
+
+### Runtime Protections
 
 - **Production environments read-only**: Write operations are structurally blocked on production
 - **Non-production write access**: Create, update, delete only available on `type: "non-production"` environments
-- **Sandboxed execution**: JavaScript runs in isolated-vm with strict memory and time limits
 - **No credential exposure**: Credentials are managed server-side
 - **OData injection prevention**: Parameters are properly encoded
 
 ## Troubleshooting
+
+### MCP Servers Not Appearing
+
+1. **Restart Claude Desktop fully** - Cmd+Q on macOS (not just close window), then reopen. On Windows, use Ctrl+Q or exit from the system tray.
+
+2. **Check server configuration** - Verify the config file path is correct:
+   ```bash
+   D365_CONFIG_FILE=./d365-environments.json D365_SINGLE_ENV=uat node dist/index.js
+   ```
+
+3. **Verify config path** - Ensure `D365_CONFIG_FILE` in your Claude config points to the actual location of `d365-environments.json`.
+
+4. **Check Claude logs** - On macOS: `~/Library/Logs/Claude/`; on Windows: `%APPDATA%\Claude\logs\`
 
 ### Authentication Errors
 
@@ -1105,7 +1273,7 @@ Delete a record from an entity.
 
 - Reduce query scope with `$top` and `$filter`
 - For large datasets, use pagination with `$skip`
-- In sandbox code, break up operations into smaller batches
+- Use `batch_query` to run multiple queries in parallel
 
 **Large dataset aggregation improvements:**
 - Pagination requests now use 60s timeout with automatic retry (2 retries with exponential backoff)

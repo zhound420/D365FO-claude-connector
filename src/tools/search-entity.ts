@@ -11,7 +11,7 @@ import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import { ProgressReporter } from "../progress.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Default values for search
@@ -209,9 +209,14 @@ function formatSearchResults(
   entity: string,
   searchField: string,
   searchTerm: string,
-  elapsedMs: number
+  elapsedMs: number,
+  envHeader: string
 ): string {
   const lines: string[] = [];
+
+  // Environment header
+  lines.push(envHeader);
+  lines.push("");
 
   // Header
   lines.push(`Search Results: ${entity}`);
@@ -271,6 +276,7 @@ Examples:
       extra: RequestHandlerExtra<ServerRequest, ServerNotification>
     ) => {
       const client = envManager.getClient(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
       const startTime = Date.now();
       const progress = new ProgressReporter(server, "search_entity", extra.sessionId);
 
@@ -328,6 +334,7 @@ Examples:
         }
 
         const elapsedMs = Date.now() - startTime;
+        const envHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
         const output = formatSearchResults(
           result.records || [],
           result.totalCount,
@@ -335,7 +342,8 @@ Examples:
           entity,
           searchField,
           searchTerm,
-          elapsedMs
+          elapsedMs,
+          envHeader
         );
 
         return {

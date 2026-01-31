@@ -9,6 +9,9 @@ dist/
 .env.local
 .env.*.local
 
+# D365 configuration (contains secrets)
+d365-environments.json
+
 # IDE
 .idea/
 .vscode/

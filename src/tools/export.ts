@@ -11,7 +11,7 @@ import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import { formatRecords, type ExportFormat } from "../utils/csv-utils.js";
 import { formatTiming } from "../progress.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Default max records for export
@@ -137,6 +137,7 @@ Examples:
     },
     async ({ entity, format, select, filter, orderBy, maxRecords, includeHeaders, environment }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       const client = envManager.getClient(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
 
       try {
         const startTime = Date.now();
@@ -163,6 +164,8 @@ Examples:
         // Build summary
         const elapsedMs = Date.now() - startTime;
         const lines: string[] = [];
+        lines.push(formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production"));
+        lines.push("");
         let summary = `Exported ${result.records.length.toLocaleString()} record(s)`;
         if (result.totalCount !== undefined) {
           summary += ` of ${result.totalCount.toLocaleString()} total`;
