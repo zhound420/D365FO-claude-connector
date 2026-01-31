@@ -10,7 +10,7 @@ import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import { ProgressReporter } from "../progress.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Limits for batch queries
@@ -356,11 +356,17 @@ async function executeBatchQueries(
 /**
  * Format batch results for output
  */
-function formatBatchResults(results: QueryResult[], totalElapsedMs: number): string {
+function formatBatchResults(results: QueryResult[], totalElapsedMs: number, envHeader?: string): string {
   const successCount = results.filter(r => r.success).length;
   const failedCount = results.length - successCount;
 
   const lines: string[] = [];
+
+  // Environment header
+  if (envHeader) {
+    lines.push(envHeader);
+    lines.push("");
+  }
 
   // Header
   lines.push("Batch Query Results");
@@ -434,6 +440,7 @@ Example:
       extra: RequestHandlerExtra<ServerRequest, ServerNotification>
     ) => {
       const client = envManager.getClient(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
       const progress = new ProgressReporter(server, "batch_query", extra.sessionId);
       const startTime = Date.now();
 
@@ -466,7 +473,8 @@ Example:
         const totalElapsedMs = Date.now() - startTime;
 
         // Format results
-        const output = formatBatchResults(results, totalElapsedMs);
+        const envHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
+        const output = formatBatchResults(results, totalElapsedMs, envHeader);
 
         // Determine if this should be marked as an error
         const allFailed = results.every(r => !r.success);

@@ -10,7 +10,7 @@ import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse, NavigationProperty, EntityDefinition } from "../types.js";
 import { ProgressReporter } from "../progress.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Default max records for join operations
@@ -451,9 +451,16 @@ async function executeClientSideJoin(
 function formatJoinResult(
   primary: EntitySource,
   secondary: EntitySource,
-  result: JoinResult
+  result: JoinResult,
+  envHeader?: string
 ): string {
   const lines: string[] = [];
+
+  // Environment header
+  if (envHeader) {
+    lines.push(envHeader);
+    lines.push("");
+  }
 
   // Header
   lines.push(`Join Results: ${primary.entity} + ${secondary.entity}`);
@@ -554,6 +561,7 @@ Examples:
     async ({ primary, secondary, joinType, flatten, maxRecords, strategy, environment }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       const client = envManager.getClient(environment);
       const metadataCache = envManager.getMetadataCache(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
 
       try {
         const progress = new ProgressReporter(server, "join_entities", extra.sessionId);
@@ -675,7 +683,8 @@ Examples:
         }
 
         // Format and return result
-        const output = formatJoinResult(primary, secondary, result);
+        const envHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
+        const output = formatJoinResult(primary, secondary, result, envHeader);
 
         return {
           content: [{

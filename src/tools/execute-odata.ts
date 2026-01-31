@@ -10,7 +10,7 @@ import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import { ProgressReporter } from "../progress.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Default max records for auto-pagination
@@ -174,6 +174,7 @@ Offset pagination:
     },
     async ({ path, fetchAll, maxRecords, skip, environment }, extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       const client = envManager.getClient(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
       try {
         // Normalize path - ensure it starts with /
         let normalizedPath = path.startsWith("/") ? path : `/${path}`;
@@ -192,6 +193,10 @@ Offset pagination:
           const result = await executeWithPagination(client, normalizedPath, maxRecords, progress);
 
           const lines: string[] = [];
+          const header = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
+          console.error(`[D365-MCP][fetchAll] Header: ${header} | envConfig: ${JSON.stringify({name: envConfig.name, displayName: envConfig.displayName, type: envConfig.type})}`);
+          lines.push(header);
+          lines.push("");
 
           // Summary with timing
           let summary = `Fetched ${result.records.length.toLocaleString()} record(s)`;
@@ -228,11 +233,17 @@ Offset pagination:
         // Handle different response types
         if (typeof result === "number") {
           // Count response
+          const countLines: string[] = [];
+          const countHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
+          console.error(`[D365-MCP][count] Header: ${countHeader} | envConfig: ${JSON.stringify({name: envConfig.name, displayName: envConfig.displayName, type: envConfig.type})}`);
+          countLines.push(countHeader);
+          countLines.push("");
+          countLines.push(`Count: ${result.toLocaleString()}`);
           return {
             content: [
               {
                 type: "text",
-                text: `Count: ${result.toLocaleString()}`,
+                text: countLines.join("\n"),
               },
             ],
           };
@@ -248,6 +259,10 @@ Offset pagination:
             const nextLink = objResult["@odata.nextLink"] as string | undefined;
 
             const lines: string[] = [];
+            const header = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
+            console.error(`[D365-MCP][collection] Header: ${header} | envConfig: ${JSON.stringify({name: envConfig.name, displayName: envConfig.displayName, type: envConfig.type})}`);
+            lines.push(header);
+            lines.push("");
 
             // Summary
             let summary = `Found ${records.length} record(s)`;
@@ -281,22 +296,34 @@ Offset pagination:
           }
 
           // Single record response
+          const singleRecordLines: string[] = [];
+          const singleHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
+          console.error(`[D365-MCP][singleRecord] Header: ${singleHeader} | envConfig: ${JSON.stringify({name: envConfig.name, displayName: envConfig.displayName, type: envConfig.type})}`);
+          singleRecordLines.push(singleHeader);
+          singleRecordLines.push("");
+          singleRecordLines.push(JSON.stringify(result, null, 2));
           return {
             content: [
               {
                 type: "text",
-                text: JSON.stringify(result, null, 2),
+                text: singleRecordLines.join("\n"),
               },
             ],
           };
         }
 
         // Other response types
+        const otherLines: string[] = [];
+        const otherHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
+        console.error(`[D365-MCP][other] Header: ${otherHeader} | envConfig: ${JSON.stringify({name: envConfig.name, displayName: envConfig.displayName, type: envConfig.type})}`);
+        otherLines.push(otherHeader);
+        otherLines.push("");
+        otherLines.push(String(result));
         return {
           content: [
             {
               type: "text",
-              text: String(result),
+              text: otherLines.join("\n"),
             },
           ],
         };

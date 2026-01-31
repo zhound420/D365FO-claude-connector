@@ -1,0 +1,17 @@
+# Prevent sensitive files from being included in git archives (git archive, GitHub releases)
+.env export-ignore
+.env.* export-ignore
+d365-environments.json export-ignore
+*.local.json export-ignore
+
+# Keep example/template files in archives
+*.example linguist-language=JSON
+*.example.json linguist-language=JSON
+d365-environments.example.json -export-ignore
+
+# Ensure consistent line endings
+* text=auto
+*.ts text eol=lf
+*.js text eol=lf
+*.json text eol=lf
+*.md text eol=lf

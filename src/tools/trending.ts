@@ -22,7 +22,7 @@ import {
   endOfDay,
 } from "../utils/date-utils.js";
 import { formatTiming } from "../progress.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Timeout for paginated requests (60 seconds - longer than default 30s)
@@ -219,9 +219,16 @@ function formatTrendingResults(
   granularity: Granularity,
   hasMovingAverage: boolean,
   movingAverageWindow?: number,
-  hasYoY?: boolean
+  hasYoY?: boolean,
+  envHeader?: string
 ): string {
   const lines: string[] = [];
+
+  // Environment header
+  if (envHeader) {
+    lines.push(envHeader);
+    lines.push("");
+  }
 
   lines.push(`Trending Analysis: ${entity}`);
   lines.push(`Metric: ${aggregation}(${valueField}) by ${granularity}`);
@@ -387,6 +394,7 @@ Examples:
     },
     async ({ entity, dateField, valueField, aggregation, granularity, periods, endDate, filter, movingAverageWindow, includeGrowthRate, compareYoY, environment }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       const client = envManager.getClient(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
       try {
         const startTime = Date.now();
         const aggFunc = aggregation as AggregationFunction;
@@ -580,6 +588,7 @@ Examples:
           yoyChange: compareYoY ? yoyChanges[i] : undefined,
         }));
 
+        const envHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
         const output = formatTrendingResults(
           dataPoints,
           entity,
@@ -588,7 +597,8 @@ Examples:
           gran,
           movingAverageWindow !== undefined && movingAverageWindow > 1,
           movingAverageWindow,
-          compareYoY
+          compareYoY,
+          envHeader
         );
 
         const timing = formatTiming(Date.now() - startTime);

@@ -78,9 +78,13 @@ export class TokenManager {
     });
 
     if (!response.ok) {
+      // Log detailed error internally but don't expose Azure AD response details
+      // to callers (could leak tenant/app configuration info)
       const errorText = await response.text();
       logError(`Token acquisition failed: ${response.status}`, errorText);
-      throw new Error(`Failed to acquire token: ${response.status} - ${errorText}`);
+      throw new Error(
+        `Failed to acquire token: ${response.status} - Check credentials and permissions`
+      );
     }
 
     const data = (await response.json()) as TokenResponse;

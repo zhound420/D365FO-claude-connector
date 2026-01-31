@@ -17,6 +17,7 @@ import { registerBatchQueryTool } from "./batch-query.js";
 import { registerSearchEntityTool } from "./search-entity.js";
 import { registerAnalyzeCustomerTool } from "./analyze-customer.js";
 import { registerListEnvironmentsTool } from "./list-environments.js";
+import { registerSetEnvironmentTool } from "./set-environment.js";
 import { registerCreateRecordTool } from "./create-record.js";
 import { registerUpdateRecordTool } from "./update-record.js";
 import { registerDeleteRecordTool } from "./delete-record.js";
@@ -27,6 +28,7 @@ import { registerDashboardTool } from "./dashboard.js";
  *
  * Tools:
  * - list_environments: List all configured D365 environments
+ * - set_environment: Set the working environment for the conversation
  * - describe_entity: Quick schema lookup for any entity
  * - execute_odata: Raw OData path execution with auto-pagination support
  * - aggregate: Perform SUM, AVG, COUNT, MIN, MAX on entity data
@@ -54,6 +56,9 @@ export function registerAllTools(
 ): void {
   // list_environments tool: Show all configured environments
   registerListEnvironmentsTool(server, envManager);
+
+  // set_environment tool: Set working environment for conversation
+  registerSetEnvironmentTool(server, envManager);
 
   // describe_entity tool: Quick schema lookup
   registerDescribeEntityTool(server, envManager);

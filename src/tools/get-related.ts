@@ -9,7 +9,7 @@ import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sd
 import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Default max records for related entities
@@ -175,6 +175,7 @@ Examples:
     async ({ entity, key, relationship, select, filter, top, fetchAll, maxRecords, environment }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       const client = envManager.getClient(environment);
       const metadataCache = envManager.getMetadataCache(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
 
       try {
         // Validate that the relationship exists using metadata cache
@@ -261,6 +262,10 @@ Examples:
         }
 
         const lines: string[] = [];
+
+        // Environment header
+        lines.push(formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production"));
+        lines.push("");
 
         // Build summary
         lines.push(`Related Records: ${entity} → ${navProp.name}`);

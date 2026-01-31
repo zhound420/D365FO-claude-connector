@@ -90,7 +90,7 @@ function loadJsonConfig(filePath: string): EnvironmentsConfig {
       throw new ConfigurationError("Configuration must have at least one environment");
     }
 
-    const environments = config.environments.map((env, index) =>
+    let environments = config.environments.map((env, index) =>
       validateEnvironmentConfig(env, index)
     );
 
@@ -101,6 +101,20 @@ function loadJsonConfig(filePath: string): EnvironmentsConfig {
         throw new ConfigurationError(`Duplicate environment name: "${env.name}"`);
       }
       names.add(env.name);
+    }
+
+    // Single-environment mode: filter to only the specified environment
+    const singleEnvName = process.env.D365_SINGLE_ENV;
+    if (singleEnvName) {
+      const targetEnv = environments.find(e => e.name === singleEnvName);
+      if (!targetEnv) {
+        const availableEnvs = environments.map(e => e.name).join(", ");
+        throw new ConfigurationError(
+          `D365_SINGLE_ENV="${singleEnvName}" not found in config. Available: ${availableEnvs}`
+        );
+      }
+      log(`Single-environment mode: using "${singleEnvName}" only`);
+      environments = [{ ...targetEnv, default: true }];
     }
 
     // Ensure exactly one default (or first env becomes default)

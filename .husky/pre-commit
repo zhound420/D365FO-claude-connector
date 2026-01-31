@@ -1,0 +1,76 @@
+#!/bin/sh
+
+# Secret scanning pre-commit hook
+# Prevents accidental commits of credentials and secrets
+
+# Patterns that indicate potential secrets
+SECRET_PATTERNS=(
+    'clientSecret.*=.*["\x27][A-Za-z0-9~_.-]{30,}["\x27]'
+    '"clientSecret".*:.*"[A-Za-z0-9~_.-]{30,}"'
+    'client_secret.*=.*["\x27][A-Za-z0-9~_.-]{30,}["\x27]'
+    'D365_CLIENT_SECRET=[A-Za-z0-9~_.-]{30,}'
+    'tenantId.*=.*["\x27][0-9a-f-]{36}["\x27]'
+    '"tenantId".*:.*"[0-9a-f-]{36}"'
+)
+
+# Files to always block from commits (even if in .gitignore)
+BLOCKED_FILES=(
+    '.env'
+    'd365-environments.json'
+)
+
+echo "Running secret scan on staged files..."
+
+# Check for blocked files
+for blocked in "${BLOCKED_FILES[@]}"; do
+    if git diff --cached --name-only | grep -qE "^${blocked}$"; then
+        echo "ERROR: Attempted to commit sensitive file: ${blocked}"
+        echo "This file contains credentials and should not be committed."
+        echo "Remove it from staging with: git reset HEAD ${blocked}"
+        exit 1
+    fi
+done
+
+# Get list of staged files (excluding deleted files)
+STAGED_FILES=$(git diff --cached --name-only --diff-filter=ACM)
+
+if [ -z "$STAGED_FILES" ]; then
+    exit 0
+fi
+
+# Check each staged file for secret patterns
+FOUND_SECRETS=0
+for file in $STAGED_FILES; do
+    # Skip binary files and example files
+    if [[ "$file" == *.example* ]] || [[ "$file" == *.example ]]; then
+        continue
+    fi
+
+    # Get the staged content of the file
+    CONTENT=$(git show ":$file" 2>/dev/null)
+
+    if [ -n "$CONTENT" ]; then
+        for pattern in "${SECRET_PATTERNS[@]}"; do
+            if echo "$CONTENT" | grep -qE "$pattern"; then
+                echo "WARNING: Potential secret found in $file"
+                echo "Pattern matched: $pattern"
+                FOUND_SECRETS=1
+            fi
+        done
+    fi
+done
+
+if [ $FOUND_SECRETS -eq 1 ]; then
+    echo ""
+    echo "Secret patterns detected in staged files!"
+    echo "Please review and remove any credentials before committing."
+    echo ""
+    echo "If these are false positives (e.g., example values), you can:"
+    echo "  1. Use placeholder values like 'your-secret-here'"
+    echo "  2. Bypass this check with: git commit --no-verify"
+    echo ""
+    exit 1
+fi
+
+echo "Secret scan passed."
+exit 0

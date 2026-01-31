@@ -18,7 +18,7 @@ import {
   type DatePeriod,
 } from "../utils/date-utils.js";
 import { formatTiming } from "../progress.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Aggregation function types
@@ -218,9 +218,16 @@ function formatComparisonResults(
   results: ComparisonResult[],
   currentLabel: string,
   previousLabel: string,
-  groupBy?: string[]
+  groupBy?: string[],
+  envHeader?: string
 ): string {
   const lines: string[] = [];
+
+  // Environment header
+  if (envHeader) {
+    lines.push(envHeader);
+    lines.push("");
+  }
 
   lines.push(`Period Comparison: ${previousLabel} vs ${currentLabel}`);
   lines.push("");
@@ -342,6 +349,7 @@ Examples:
     },
     async ({ entity, dateField, aggregations, comparisonType, referenceDate, period1, period2, filter, groupBy, environment }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       const client = envManager.getClient(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
 
       try {
         const startTime = Date.now();
@@ -433,11 +441,13 @@ Examples:
           `${aggregations[0].function.toLowerCase()}_${aggregations[0].field === "*" ? "all" : aggregations[0].field}`;
         comparisonResults.sort((a, b) => (b.currentPeriod[firstAlias] || 0) - (a.currentPeriod[firstAlias] || 0));
 
+        const envHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
         const output = formatComparisonResults(
           comparisonResults,
           currentPeriod.label,
           previousPeriod.label,
-          groupBy
+          groupBy,
+          envHeader
         );
 
         const timing = formatTiming(Date.now() - startTime);

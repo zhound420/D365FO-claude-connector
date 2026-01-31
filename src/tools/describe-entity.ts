@@ -7,7 +7,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
 import type { EnvironmentManager } from "../environment-manager.js";
-import { environmentSchema } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader } from "./common.js";
 
 /**
  * Register the describe_entity tool
@@ -22,6 +22,7 @@ export function registerDescribeEntityTool(server: McpServer, envManager: Enviro
     },
     async ({ entity, environment }, _extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => {
       const metadataCache = envManager.getMetadataCache(environment);
+      const envConfig = envManager.getEnvironmentConfig(environment);
       try {
         const definition = await metadataCache.getEntityDefinition(entity);
 
@@ -48,6 +49,7 @@ export function registerDescribeEntityTool(server: McpServer, envManager: Enviro
 
         // Format the entity definition
         const sections: string[] = [];
+        sections.push(formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production"));
 
         // Check if schema is inferred vs complete
         const isInferred = definition.description?.includes("inferred from sample");
