@@ -154,11 +154,53 @@ Optional:
 
 ### Azure AD App Registration
 
-1. Create an Azure AD app registration
-2. Add API permission: `Dynamics 365 Finance and Operations` > `CustomService.ReadWrite.All` (Application)
-3. Grant admin consent
-4. Create a client secret
-5. Note the tenant ID, client ID, and secret
+#### Step 1: Create Azure AD App
+
+1. Go to [Azure Portal](https://portal.azure.com) > Azure Active Directory > App registrations
+2. Click "New registration"
+3. Name it (e.g., "D365 MCP Server")
+4. Select "Accounts in this organizational directory only"
+5. Click Register
+
+#### Step 2: Configure API Permissions
+
+1. Go to "API permissions" > "Add a permission"
+2. Select "Dynamics 365 Finance and Operations"
+3. Choose "Application permissions" > `CustomService.ReadWrite.All`
+4. Click "Grant admin consent for [your organization]"
+
+#### Step 3: Create Client Secret
+
+1. Go to "Certificates & secrets" > "New client secret"
+2. Add a description and expiry period
+3. Copy the secret value immediately (shown only once)
+4. Note down:
+   - **Tenant ID**: Found on the Overview page
+   - **Client ID**: Application (client) ID on Overview page
+   - **Client Secret**: The value you just copied
+
+#### Step 4: Register App in D365 Environments
+
+**Important:** This step must be done in each D365 environment (Production, UAT, Dev) you want to connect to.
+
+1. In D365 F&O, navigate to:
+   **System Administration > Setup > Azure Active Directory applications**
+
+2. Click "New" to add a record:
+   | Field | Value |
+   |-------|-------|
+   | Client ID | The Application (client) ID from Azure AD |
+   | Name | Descriptive name (e.g., "MCP Server Integration") |
+   | User ID | A D365 user account for the app to run as |
+
+3. The **User ID** determines what data the app can access:
+   - Use a service account with appropriate security roles
+   - For read-only access: assign roles like "View all data"
+   - For write access on non-production: assign roles that allow create/update/delete
+
+4. Repeat for each environment you want to connect to
+
+> **Note:** If you skip this step, API calls will fail with 401 Unauthorized or 403 Forbidden errors even though Azure AD authentication succeeded.
 
 ## Setup
 
