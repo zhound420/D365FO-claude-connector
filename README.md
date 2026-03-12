@@ -8,7 +8,7 @@ An MCP (Model Context Protocol) server that provides access to Microsoft Dynamic
 - **Read/Write Operations** - Query data on all environments; create, update, delete on non-production only
 - **Production Safety** - Production environments are always read-only by design
 - **MCP Resources** for schema discovery and metadata exploration
-- **20+ Specialized Tools** for flexible data access, aggregation, and analysis
+- **22 Specialized Tools** for flexible data access, aggregation, batch operations, and analysis
 - **Environment Dashboard** - Health monitoring, API statistics, and operation tracking
 - **Secure Authentication** via Azure AD client credentials
 - **Automatic Metadata Caching** (24-hour TTL, per-environment)
@@ -51,6 +51,8 @@ All tools support an optional `environment` parameter to target specific D365 en
 | `create_record` | Create new records (non-production environments only) |
 | `update_record` | Update existing records (non-production environments only) |
 | `delete_record` | Delete records (non-production environments only) |
+| `batch_crud` | Execute multiple create/update/delete operations in a single batch request (non-production only) |
+| `compare_schemas` | Compare entity schemas between two environments to detect schema drift |
 | `dashboard` | Display environment dashboard with health status, API statistics, and recent operations |
 
 ## Installation
@@ -1083,6 +1085,12 @@ npm run dev
 
 # Run directly (requires environment variables)
 npm start
+
+# Run tests
+npm test
+
+# Run tests in watch mode
+npm run test:watch
 ```
 
 ## Project Structure
@@ -1112,10 +1120,12 @@ src/
 │   └── dashboard.ts        # d365://dashboard resource
 ├── utils/
 │   ├── date-utils.ts       # Date period calculations
-│   └── csv-utils.ts        # CSV/TSV formatting
+│   ├── csv-utils.ts        # CSV/TSV formatting
+│   ├── env-utils.ts        # Environment variable parsing with validation
+│   └── pagination.ts       # Shared pagination utilities (fetchPageWithRetry, paginatedFetch)
 └── tools/
     ├── index.ts            # Tool registration
-    ├── common.ts           # Shared tool utilities
+    ├── common.ts           # Shared tool utilities and error formatting
     ├── list-environments.ts
     ├── set-environment.ts
     ├── describe-entity.ts
@@ -1128,12 +1138,20 @@ src/
     ├── saved-queries.ts    # save/execute/delete query templates
     ├── join-entities.ts
     ├── batch-query.ts
+    ├── batch-crud.ts       # Batch create/update/delete via $batch (non-production only)
+    ├── compare-schemas.ts  # Cross-environment schema comparison
     ├── search-entity.ts
     ├── analyze-customer.ts
     ├── create-record.ts    # Write operation (non-production only)
     ├── update-record.ts    # Write operation (non-production only)
     ├── delete-record.ts    # Write operation (non-production only)
     └── dashboard.ts
+tests/
+├── auth.test.ts            # Token caching, refresh dedup, invalidation
+├── d365-client.test.ts     # Retry logic, key formatting, CRUD operations
+├── config-loader.test.ts   # JSON loading, env var fallback, validation
+├── pagination.test.ts      # Shared pagination utilities
+└── env-utils.test.ts       # parseInt validation utility
 ```
 
 ## Write Operations (Non-Production Only)
