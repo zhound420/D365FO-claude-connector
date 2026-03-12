@@ -12,62 +12,8 @@ import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import { formatTiming, ProgressReporter } from "../progress.js";
-import { environmentSchema, formatEnvironmentHeader } from "./common.js";
-
-/**
- * Timeout for paginated requests (60 seconds - longer than default 30s)
- * Can be configured via environment variable
- */
-const PAGINATION_TIMEOUT_MS = parseInt(process.env.D365_PAGINATION_TIMEOUT_MS || "60000", 10);
-
-/**
- * Maximum retries for individual page fetches within pagination
- */
-const PAGE_FETCH_MAX_RETRIES = 2;
-
-/**
- * Sleep helper for retry backoff
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/**
- * Fetch a single page with retry logic for pagination operations.
- * Uses longer timeout (60s) and retries with exponential backoff.
- * This is in addition to the client-level retry for a more robust pagination.
- */
-async function fetchPageWithRetry<T>(
-  client: D365Client,
-  url: string,
-  maxRetries: number = PAGE_FETCH_MAX_RETRIES
-): Promise<T> {
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await client.request<T>(url, {}, PAGINATION_TIMEOUT_MS);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-
-      // Don't retry on non-retryable errors (auth, not found, bad request)
-      if (error instanceof D365Error) {
-        if (error.statusCode === 401 || error.statusCode === 403 ||
-            error.statusCode === 404 || error.statusCode === 400) {
-          throw error;
-        }
-      }
-
-      if (attempt < maxRetries) {
-        // Exponential backoff: 2s, 4s
-        const backoffMs = 2000 * Math.pow(2, attempt);
-        await sleep(backoffMs);
-      }
-    }
-  }
-
-  throw lastError || new Error("Page fetch failed after retries");
-}
+import { environmentSchema, formatEnvironmentHeader, formatToolError } from "./common.js";
+import { fetchPageWithRetry } from "../utils/pagination.js";
 
 /**
  * Supported aggregation functions

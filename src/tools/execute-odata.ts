@@ -7,132 +7,15 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
 import type { EnvironmentManager } from "../environment-manager.js";
-import { D365Client, D365Error } from "../d365-client.js";
-import type { ODataResponse } from "../types.js";
+import { D365Error } from "../d365-client.js";
 import { ProgressReporter } from "../progress.js";
-import { environmentSchema, formatEnvironmentHeader } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader, formatToolError } from "./common.js";
+import { paginatedFetch } from "../utils/pagination.js";
 
 /**
  * Default max records for auto-pagination
  */
 const DEFAULT_MAX_RECORDS = 50000;
-
-/**
- * Timeout for paginated requests (60 seconds - longer than default 30s)
- */
-const PAGINATION_TIMEOUT_MS = parseInt(process.env.D365_PAGINATION_TIMEOUT_MS || "60000", 10);
-
-/**
- * Maximum retries for individual page fetches within pagination
- */
-const PAGE_FETCH_MAX_RETRIES = 2;
-
-/**
- * Sleep helper for retry backoff
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/**
- * Fetch a single page with retry logic for pagination operations.
- */
-async function fetchPageWithRetry<T>(
-  client: D365Client,
-  url: string,
-  maxRetries: number = PAGE_FETCH_MAX_RETRIES
-): Promise<T> {
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await client.request<T>(url, {}, PAGINATION_TIMEOUT_MS);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-
-      if (error instanceof D365Error) {
-        if (error.statusCode === 401 || error.statusCode === 403 ||
-            error.statusCode === 404 || error.statusCode === 400) {
-          throw error;
-        }
-      }
-
-      if (attempt < maxRetries) {
-        const backoffMs = 2000 * Math.pow(2, attempt);
-        await sleep(backoffMs);
-      }
-    }
-  }
-
-  throw lastError || new Error("Page fetch failed after retries");
-}
-
-/**
- * Execute OData request with automatic pagination
- * Uses per-page retry with 60s timeout for robustness on large datasets
- */
-async function executeWithPagination(
-  client: D365Client,
-  initialPath: string,
-  maxRecords: number,
-  progress?: ProgressReporter
-): Promise<{
-  records: unknown[];
-  totalCount?: number;
-  pagesFetched: number;
-  truncated: boolean;
-  elapsedMs: number;
-}> {
-  const startTime = Date.now();
-  const allRecords: unknown[] = [];
-  let pagesFetched = 0;
-  let totalCount: number | undefined;
-  let truncated = false;
-
-  // Ensure $count=true is in the path for first request
-  let currentPath = initialPath;
-  if (!currentPath.includes("$count=true") && !currentPath.includes("/$count")) {
-    currentPath += currentPath.includes("?") ? "&$count=true" : "?$count=true";
-  }
-
-  let nextLink: string | undefined = currentPath;
-
-  while (nextLink) {
-    const response: ODataResponse = await fetchPageWithRetry(client, nextLink);
-    pagesFetched++;
-
-    // Capture total count from first response
-    if (pagesFetched === 1 && response["@odata.count"] !== undefined) {
-      totalCount = response["@odata.count"];
-    }
-
-    if (response.value && Array.isArray(response.value)) {
-      allRecords.push(...response.value);
-    }
-
-    // Report progress for pagination
-    if (progress && pagesFetched > 1) {
-      const totalInfo = totalCount !== undefined ? ` of ${totalCount.toLocaleString()}` : "";
-      await progress.report(`Fetching page ${pagesFetched}... (${allRecords.length.toLocaleString()}${totalInfo} records)`);
-    }
-
-    // Check if we've hit the max records limit
-    if (allRecords.length >= maxRecords) {
-      truncated = true;
-      break;
-    }
-
-    nextLink = response["@odata.nextLink"];
-  }
-
-  return {
-    records: allRecords.slice(0, maxRecords),
-    totalCount,
-    pagesFetched,
-    truncated,
-    elapsedMs: Date.now() - startTime,
-  };
-}
 
 /**
  * Register the execute_odata tool
@@ -190,11 +73,14 @@ Offset pagination:
           const progress = new ProgressReporter(server, "execute_odata", extra.sessionId);
           await progress.report("Starting paginated fetch...");
 
-          const result = await executeWithPagination(client, normalizedPath, maxRecords, progress);
+          const result = await paginatedFetch(client, normalizedPath, {
+            maxRecords,
+            progress,
+            ensureCount: true,
+          });
 
           const lines: string[] = [];
           const header = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
-          console.error(`[D365-MCP][fetchAll] Header: ${header} | envConfig: ${JSON.stringify({name: envConfig.name, displayName: envConfig.displayName, type: envConfig.type})}`);
           lines.push(header);
           lines.push("");
 
@@ -235,7 +121,6 @@ Offset pagination:
           // Count response
           const countLines: string[] = [];
           const countHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
-          console.error(`[D365-MCP][count] Header: ${countHeader} | envConfig: ${JSON.stringify({name: envConfig.name, displayName: envConfig.displayName, type: envConfig.type})}`);
           countLines.push(countHeader);
           countLines.push("");
           countLines.push(`Count: ${result.toLocaleString()}`);
@@ -260,7 +145,6 @@ Offset pagination:
 
             const lines: string[] = [];
             const header = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
-            console.error(`[D365-MCP][collection] Header: ${header} | envConfig: ${JSON.stringify({name: envConfig.name, displayName: envConfig.displayName, type: envConfig.type})}`);
             lines.push(header);
             lines.push("");
 
@@ -298,7 +182,6 @@ Offset pagination:
           // Single record response
           const singleRecordLines: string[] = [];
           const singleHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
-          console.error(`[D365-MCP][singleRecord] Header: ${singleHeader} | envConfig: ${JSON.stringify({name: envConfig.name, displayName: envConfig.displayName, type: envConfig.type})}`);
           singleRecordLines.push(singleHeader);
           singleRecordLines.push("");
           singleRecordLines.push(JSON.stringify(result, null, 2));
@@ -315,7 +198,6 @@ Offset pagination:
         // Other response types
         const otherLines: string[] = [];
         const otherHeader = formatEnvironmentHeader(envConfig.name, envConfig.displayName, envConfig.type === "production");
-        console.error(`[D365-MCP][other] Header: ${otherHeader} | envConfig: ${JSON.stringify({name: envConfig.name, displayName: envConfig.displayName, type: envConfig.type})}`);
         otherLines.push(otherHeader);
         otherLines.push("");
         otherLines.push(String(result));

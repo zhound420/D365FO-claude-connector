@@ -3,14 +3,14 @@
  */
 
 import { z } from "zod";
-import * as fs from "fs";
+import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
-import { environmentSchema, formatEnvironmentHeader } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader, formatToolError } from "./common.js";
 
 /**
  * Storage path for saved queries
@@ -29,6 +29,7 @@ export interface SavedQuery {
   orderBy?: string;
   top?: number;
   expand?: string;
+  environment?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -44,24 +45,25 @@ interface QueriesStorage {
 /**
  * Load saved queries from disk
  */
-export function loadSavedQueries(): Record<string, SavedQuery> {
+export async function loadSavedQueries(): Promise<Record<string, SavedQuery>> {
   try {
-    if (fs.existsSync(QUERIES_FILE)) {
-      const content = fs.readFileSync(QUERIES_FILE, "utf-8");
-      const storage: QueriesStorage = JSON.parse(content);
-      return storage.queries || {};
-    }
+    const content = await fs.readFile(QUERIES_FILE, "utf-8");
+    const storage: QueriesStorage = JSON.parse(content);
+    return storage.queries || {};
   } catch (error) {
-    // If file is corrupted, start fresh
+    // File doesn't exist or is corrupted - start fresh
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {};
+    }
     console.error("Error loading saved queries:", error);
+    return {};
   }
-  return {};
 }
 
 /**
  * Save queries to disk using atomic write (write to temp, then rename)
  */
-function saveQueries(queries: Record<string, SavedQuery>): void {
+async function saveQueries(queries: Record<string, SavedQuery>): Promise<void> {
   const storage: QueriesStorage = {
     version: 1,
     queries,
@@ -72,12 +74,12 @@ function saveQueries(queries: Record<string, SavedQuery>): void {
   // This prevents file corruption if the process crashes mid-write
   const tempFile = `${QUERIES_FILE}.tmp.${process.pid}`;
   try {
-    fs.writeFileSync(tempFile, content, "utf-8");
-    fs.renameSync(tempFile, QUERIES_FILE);
+    await fs.writeFile(tempFile, content, "utf-8");
+    await fs.rename(tempFile, QUERIES_FILE);
   } catch (error) {
     // Clean up temp file if rename fails
     try {
-      fs.unlinkSync(tempFile);
+      await fs.unlink(tempFile);
     } catch {
       // Ignore cleanup errors
     }
@@ -179,11 +181,12 @@ export function registerSaveQueryTool(server: McpServer): void {
     `Save a reusable query template for later execution.
 
 Query templates can include parameters using {{paramName}} syntax that will be substituted at execution time.
+Optionally associate a query with a specific environment.
 
 Examples:
 - Basic query: name="active_customers", entity="CustomersV3", filter="IsActive eq true"
 - With parameters: name="customer_orders", entity="SalesOrderHeaders", filter="CustomerAccount eq '{{customerId}}'"
-- Complex query: name="recent_sales", entity="SalesOrderLines", select=["ItemNumber", "LineAmount"], filter="CreatedDateTime ge {{startDate}}", orderBy="CreatedDateTime desc", top=100`,
+- For specific env: name="uat_customers", entity="CustomersV3", environment="uat"`,
     {
       name: z.string().describe("Unique name for the query (e.g., 'active_customers')"),
       description: z.string().optional().describe("Optional description of what the query does"),
@@ -193,10 +196,13 @@ Examples:
       orderBy: z.string().optional().describe("OData $orderby expression"),
       top: z.number().optional().describe("Maximum records to return"),
       expand: z.string().optional().describe("OData $expand expression for related entities"),
+      environment: environmentSchema.describe(
+        "Optional environment to associate with this query. When set, execute_saved_query will default to this environment."
+      ),
     },
-    async ({ name, description, entity, select, filter, orderBy, top, expand }) => {
+    async ({ name, description, entity, select, filter, orderBy, top, expand, environment }) => {
       try {
-        const queries = loadSavedQueries();
+        const queries = await loadSavedQueries();
         const isUpdate = queries[name] !== undefined;
         const now = new Date().toISOString();
 
@@ -209,12 +215,13 @@ Examples:
           orderBy,
           top,
           expand,
+          environment,
           createdAt: isUpdate ? queries[name].createdAt : now,
           updatedAt: now,
         };
 
         queries[name] = query;
-        saveQueries(queries);
+        await saveQueries(queries);
 
         const params = extractParameterNames(query);
         const paramInfo = params.length > 0
@@ -273,10 +280,8 @@ Examples:
       environment: environmentSchema,
     },
     async ({ name, params, fetchAll, maxRecords, environment }) => {
-      const client = envManager.getClient(environment);
-      const envConfig = envManager.getEnvironmentConfig(environment);
       try {
-        const queries = loadSavedQueries();
+        const queries = await loadSavedQueries();
         const query = queries[name];
 
         if (!query) {
@@ -291,6 +296,11 @@ Examples:
             isError: true,
           };
         }
+
+        // Use saved environment as fallback if no environment explicitly provided
+        const resolvedEnvironment = environment || query.environment;
+        const client = envManager.getClient(resolvedEnvironment);
+        const envConfig = envManager.getEnvironmentConfig(resolvedEnvironment);
 
         // Check for missing parameters
         const requiredParams = extractParameterNames(query);
@@ -446,7 +456,7 @@ Examples:
     },
     async ({ name }) => {
       try {
-        const queries = loadSavedQueries();
+        const queries = await loadSavedQueries();
 
         if (!queries[name]) {
           return {
@@ -461,7 +471,7 @@ Examples:
         }
 
         delete queries[name];
-        saveQueries(queries);
+        await saveQueries(queries);
 
         return {
           content: [

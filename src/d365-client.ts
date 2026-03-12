@@ -33,6 +33,135 @@ export class D365Error extends Error {
 }
 
 /**
+ * Batch operation for $batch endpoint
+ */
+export interface BatchOperation {
+  method: "POST" | "PATCH" | "DELETE";
+  path: string;
+  data?: Record<string, unknown>;
+  headers?: Record<string, string>;
+}
+
+/**
+ * Batch response for a single operation
+ */
+export interface BatchResponse {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  body?: unknown;
+}
+
+/**
+ * Build multipart/mixed body for $batch request
+ */
+function buildBatchBody(operations: BatchOperation[], boundary: string): string {
+  const changesetBoundary = `changeset_${generateCorrelationId()}`;
+  const parts: string[] = [];
+
+  parts.push(`--${boundary}`);
+  parts.push(`Content-Type: multipart/mixed; boundary=${changesetBoundary}`);
+  parts.push("");
+
+  for (let i = 0; i < operations.length; i++) {
+    const op = operations[i];
+    parts.push(`--${changesetBoundary}`);
+    parts.push("Content-Type: application/http");
+    parts.push("Content-Transfer-Encoding: binary");
+    parts.push(`Content-ID: ${i + 1}`);
+    parts.push("");
+
+    const path = op.path.startsWith("/") ? `/data${op.path}` : `/data/${op.path}`;
+    parts.push(`${op.method} ${path} HTTP/1.1`);
+    parts.push("Content-Type: application/json");
+    parts.push("Accept: application/json");
+    if (op.headers) {
+      for (const [key, value] of Object.entries(op.headers)) {
+        parts.push(`${key}: ${value}`);
+      }
+    }
+    parts.push("");
+
+    if (op.data) {
+      parts.push(JSON.stringify(op.data));
+    }
+    parts.push("");
+  }
+
+  parts.push(`--${changesetBoundary}--`);
+  parts.push(`--${boundary}--`);
+
+  return parts.join("\r\n");
+}
+
+/**
+ * Extract boundary string from Content-Type header
+ */
+function extractBoundary(contentType: string): string | null {
+  const match = contentType.match(/boundary=([^\s;]+)/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Parse $batch response into individual responses
+ */
+function parseBatchResponse(responseText: string, boundary: string): BatchResponse[] {
+  const results: BatchResponse[] = [];
+  const parts = responseText.split(`--${boundary}`).filter(
+    p => p.trim() !== "" && p.trim() !== "--"
+  );
+
+  for (const part of parts) {
+    // Find the HTTP response line within the part
+    const httpMatch = part.match(/HTTP\/1\.\d\s+(\d+)\s+(.*)/);
+    if (!httpMatch) continue;
+
+    const status = parseInt(httpMatch[1], 10);
+    const statusText = httpMatch[2].trim();
+    const headers: Record<string, string> = {};
+
+    // Parse headers after the HTTP status line
+    const lines = part.split(/\r?\n/);
+    let bodyStartIndex = -1;
+    let inHttpHeaders = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].startsWith("HTTP/")) {
+        inHttpHeaders = true;
+        continue;
+      }
+      if (inHttpHeaders) {
+        if (lines[i].trim() === "") {
+          bodyStartIndex = i + 1;
+          break;
+        }
+        const headerMatch = lines[i].match(/^([^:]+):\s*(.+)/);
+        if (headerMatch) {
+          headers[headerMatch[1].toLowerCase()] = headerMatch[2].trim();
+        }
+      }
+    }
+
+    // Parse body
+    let body: unknown = undefined;
+    if (bodyStartIndex > 0) {
+      const bodyText = lines.slice(bodyStartIndex).join("\n").trim();
+      if (bodyText) {
+        try {
+          body = JSON.parse(bodyText);
+        } catch {
+          body = bodyText;
+        }
+      }
+    }
+
+    results.push({ status, statusText, headers, body });
+  }
+
+  return results;
+}
+
+/**
  * Default request timeout in milliseconds
  */
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -431,6 +560,105 @@ export class D365Client {
   }
 
   /**
+   * Raw request method with retry, timeout, and correlation ID support.
+   * Returns the full Response object for callers that need headers (e.g., ETag).
+   * Used internally by CRUD operations.
+   */
+  private async requestRaw(
+    path: string,
+    options: RequestInit = {},
+    timeoutMs: number = DEFAULT_TIMEOUT_MS
+  ): Promise<Response> {
+    const url = path.startsWith("http") ? path : `${this.baseUrl}${path}`;
+    const correlationId = generateCorrelationId();
+    let lastError: Error | null = null;
+    const requestStartTime = Date.now();
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const token = await this.tokenManager.getToken();
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+        try {
+          const response = await fetch(url, {
+            ...options,
+            signal: controller.signal,
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: "application/json",
+              "OData-MaxVersion": "4.0",
+              "OData-Version": "4.0",
+              "x-correlation-id": correlationId,
+              ...options.headers,
+            },
+          });
+
+          clearTimeout(timeoutId);
+
+          if (!response.ok) {
+            // Don't retry 412 (concurrency conflict) - it's a business logic error
+            if (response.status === 412) {
+              this.recordMetrics(requestStartTime, false);
+              throw new D365Error(
+                "Record was modified by another user. Refresh and try again.",
+                412
+              );
+            }
+
+            if (RETRYABLE_STATUS_CODES.includes(response.status) && attempt < MAX_RETRIES) {
+              let retryDelay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
+              const retryAfterHeader = response.headers.get("Retry-After");
+              if (retryAfterHeader) {
+                const retryAfterSeconds = parseInt(retryAfterHeader, 10);
+                if (!isNaN(retryAfterSeconds)) {
+                  retryDelay = retryAfterSeconds * 1000;
+                }
+              }
+              log(`Request failed with status ${response.status}, retrying in ${retryDelay}ms (attempt ${attempt + 1}/${MAX_RETRIES}) [${correlationId}]`);
+              await sleep(retryDelay);
+              continue;
+            }
+
+            this.recordMetrics(requestStartTime, false);
+            await this.handleErrorResponse(response);
+          }
+
+          this.recordMetrics(requestStartTime, true);
+          return response;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      } catch (error) {
+        if (error instanceof Error && error.name === "AbortError") {
+          lastError = new D365Error(`Request timed out after ${timeoutMs}ms [${correlationId}]`, 0);
+          if (attempt < MAX_RETRIES) {
+            const retryDelay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
+            log(`Request timed out [${correlationId}], retrying in ${retryDelay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+            await sleep(retryDelay);
+            continue;
+          }
+        } else if (error instanceof D365Error) {
+          error.message = `${error.message} [${correlationId}]`;
+          throw error;
+        } else {
+          lastError = error instanceof Error ? error : new Error(String(error));
+          if (attempt < MAX_RETRIES) {
+            const retryDelay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt);
+            log(`Network error [${correlationId}], retrying in ${retryDelay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
+            await sleep(retryDelay);
+            continue;
+          }
+        }
+      }
+    }
+
+    this.recordMetrics(requestStartTime, false);
+    throw lastError || new D365Error(`Request failed after all retries [${correlationId}]`, 0);
+  }
+
+  /**
    * Create a new record in an entity (POST)
    * Returns the created record with server-generated fields
    */
@@ -440,22 +668,14 @@ export class D365Client {
   ): Promise<{ record: T; etag?: string }> {
     const path = `/${entityName}`;
 
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await this.requestRaw(path, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${await this.tokenManager.getToken()}`,
         "Content-Type": "application/json",
-        Accept: "application/json",
-        "OData-MaxVersion": "4.0",
-        "OData-Version": "4.0",
         Prefer: "return=representation",
       },
       body: JSON.stringify(data),
     });
-
-    if (!response.ok) {
-      await this.handleErrorResponse(response);
-    }
 
     const record = await response.json() as T;
     const etag = response.headers.get("ETag") || undefined;
@@ -478,34 +698,18 @@ export class D365Client {
     const path = `/${entityName}(${keyString})`;
 
     const headers: Record<string, string> = {
-      Authorization: `Bearer ${await this.tokenManager.getToken()}`,
       "Content-Type": "application/json",
-      Accept: "application/json",
-      "OData-MaxVersion": "4.0",
-      "OData-Version": "4.0",
     };
 
-    // Add If-Match header for optimistic concurrency if ETag provided
     if (etag) {
       headers["If-Match"] = etag;
     }
 
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await this.requestRaw(path, {
       method: "PATCH",
       headers,
       body: JSON.stringify(data),
     });
-
-    if (!response.ok) {
-      // Handle concurrency conflict
-      if (response.status === 412) {
-        throw new D365Error(
-          "Record was modified by another user. Refresh and try again.",
-          412
-        );
-      }
-      await this.handleErrorResponse(response);
-    }
 
     const newEtag = response.headers.get("ETag") || undefined;
     return { etag: newEtag };
@@ -523,32 +727,38 @@ export class D365Client {
     const keyString = this.formatKey(key);
     const path = `/${entityName}(${keyString})`;
 
-    const headers: Record<string, string> = {
-      Authorization: `Bearer ${await this.tokenManager.getToken()}`,
-      Accept: "application/json",
-      "OData-MaxVersion": "4.0",
-      "OData-Version": "4.0",
-    };
+    const headers: Record<string, string> = {};
 
-    // Add If-Match header for optimistic concurrency if ETag provided
     if (etag) {
       headers["If-Match"] = etag;
     }
 
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    await this.requestRaw(path, {
       method: "DELETE",
       headers,
     });
+  }
 
-    if (!response.ok) {
-      // Handle concurrency conflict
-      if (response.status === 412) {
-        throw new D365Error(
-          "Record was modified by another user. Refresh and try again.",
-          412
-        );
-      }
-      await this.handleErrorResponse(response);
-    }
+  /**
+   * Execute a batch request using OData $batch endpoint
+   * Supports multiple operations in a single HTTP request
+   */
+  async batchRequest(
+    operations: BatchOperation[]
+  ): Promise<BatchResponse[]> {
+    const boundary = `batch_${generateCorrelationId()}`;
+    const body = buildBatchBody(operations, boundary);
+
+    const response = await this.requestRaw("/$batch", {
+      method: "POST",
+      headers: {
+        "Content-Type": `multipart/mixed; boundary=${boundary}`,
+      },
+      body,
+    });
+
+    const responseText = await response.text();
+    const responseBoundary = extractBoundary(response.headers.get("Content-Type") || "");
+    return parseBatchResponse(responseText, responseBoundary || boundary);
   }
 }

@@ -44,6 +44,9 @@ export class TokenManager {
       this.cachedToken = token;
       log("Token acquired successfully");
       return token.accessToken;
+    } catch (error) {
+      this.cachedToken = null;
+      throw error;
     } finally {
       this.refreshPromise = null;
     }

@@ -22,6 +22,8 @@ import { registerCreateRecordTool } from "./create-record.js";
 import { registerUpdateRecordTool } from "./update-record.js";
 import { registerDeleteRecordTool } from "./delete-record.js";
 import { registerDashboardTool } from "./dashboard.js";
+import { registerBatchCrudTool } from "./batch-crud.js";
+import { registerCompareSchemasTool } from "./compare-schemas.js";
 
 /**
  * Register all D365 tools with the MCP server
@@ -103,4 +105,10 @@ export function registerAllTools(
 
   // Dashboard tool: Environment status and metrics
   registerDashboardTool(server, envManager);
+
+  // batch_crud tool: Batch create/update/delete operations (non-production only)
+  registerBatchCrudTool(server, envManager);
+
+  // compare_schemas tool: Cross-environment schema comparison
+  registerCompareSchemasTool(server, envManager);
 }

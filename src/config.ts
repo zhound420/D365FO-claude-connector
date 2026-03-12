@@ -2,40 +2,7 @@
  * Environment configuration loader for D365 MCP Server
  */
 
-import type { D365Config, TransportMode } from "./types.js";
-
-/**
- * Load and validate D365 configuration from environment variables
- */
-export function loadD365Config(): D365Config {
-  const tenantId = process.env.D365_TENANT_ID;
-  const clientId = process.env.D365_CLIENT_ID;
-  const clientSecret = process.env.D365_CLIENT_SECRET;
-  let environmentUrl = process.env.D365_ENVIRONMENT_URL;
-
-  if (!tenantId) {
-    throw new Error("D365_TENANT_ID environment variable is required");
-  }
-  if (!clientId) {
-    throw new Error("D365_CLIENT_ID environment variable is required");
-  }
-  if (!clientSecret) {
-    throw new Error("D365_CLIENT_SECRET environment variable is required");
-  }
-  if (!environmentUrl) {
-    throw new Error("D365_ENVIRONMENT_URL environment variable is required");
-  }
-
-  // Remove trailing slash from environment URL (D365 requirement)
-  environmentUrl = environmentUrl.replace(/\/+$/, "");
-
-  return {
-    tenantId,
-    clientId,
-    clientSecret,
-    environmentUrl,
-  };
-}
+import type { TransportMode } from "./types.js";
 
 /**
  * Get the transport mode from environment

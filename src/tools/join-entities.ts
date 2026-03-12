@@ -8,9 +8,10 @@ import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/proto
 import type { ServerRequest, ServerNotification } from "@modelcontextprotocol/sdk/types.js";
 import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
-import type { ODataResponse, NavigationProperty, EntityDefinition } from "../types.js";
+import type { NavigationProperty, EntityDefinition } from "../types.js";
 import { ProgressReporter } from "../progress.js";
-import { environmentSchema, formatEnvironmentHeader } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader, formatToolError } from "./common.js";
+import { paginatedFetch } from "../utils/pagination.js";
 
 /**
  * Default max records for join operations
@@ -107,69 +108,6 @@ function buildQueryPath(
 }
 
 /**
- * Execute paginated fetch of records
- */
-async function fetchWithPagination(
-  client: D365Client,
-  initialPath: string,
-  maxRecords: number,
-  progress?: ProgressReporter,
-  label?: string
-): Promise<{
-  records: Record<string, unknown>[];
-  totalCount?: number;
-  truncated: boolean;
-}> {
-  const allRecords: Record<string, unknown>[] = [];
-  let pagesFetched = 0;
-  let totalCount: number | undefined;
-  let truncated = false;
-
-  // Ensure $count=true is in the path
-  let currentPath = initialPath;
-  if (!currentPath.includes("$count=true")) {
-    currentPath += currentPath.includes("?") ? "&$count=true" : "?$count=true";
-  }
-
-  let nextLink: string | undefined = currentPath;
-
-  while (nextLink) {
-    const response: ODataResponse<Record<string, unknown>> = await client.request(nextLink);
-    pagesFetched++;
-
-    // Capture total count from first response
-    if (pagesFetched === 1 && response["@odata.count"] !== undefined) {
-      totalCount = response["@odata.count"];
-    }
-
-    if (response.value && Array.isArray(response.value)) {
-      allRecords.push(...response.value);
-    }
-
-    // Report progress
-    if (progress && pagesFetched > 1) {
-      const totalInfo = totalCount !== undefined ? ` of ${totalCount.toLocaleString()}` : "";
-      const labelPrefix = label ? `${label}: ` : "";
-      await progress.report(`${labelPrefix}Fetching page ${pagesFetched}... (${allRecords.length.toLocaleString()}${totalInfo} records)`);
-    }
-
-    // Check if we've hit the max records limit
-    if (allRecords.length >= maxRecords) {
-      truncated = true;
-      break;
-    }
-
-    nextLink = response["@odata.nextLink"];
-  }
-
-  return {
-    records: allRecords.slice(0, maxRecords),
-    totalCount,
-    truncated,
-  };
-}
-
-/**
  * Execute join using OData $expand (server-side join)
  */
 async function executeExpandStrategy(
@@ -210,7 +148,11 @@ async function executeExpandStrategy(
   await progress.report("Executing server-side join with $expand...");
 
   // Fetch with pagination
-  const result = await fetchWithPagination(client, path, maxRecords, progress, "Primary");
+  const result = await paginatedFetch<Record<string, unknown>>(client, path, {
+    maxRecords,
+    progress,
+    label: "Primary",
+  });
 
   // Process results - flatten the expanded records
   const joinedRecords: Record<string, unknown>[] = [];
@@ -318,7 +260,11 @@ async function executeClientSideJoin(
     count: true,
   });
 
-  const primaryResult = await fetchWithPagination(client, primaryPath, maxRecords, progress, "Primary");
+  const primaryResult = await paginatedFetch<Record<string, unknown>>(client, primaryPath, {
+    maxRecords,
+    progress,
+    label: "Primary",
+  });
 
   if (primaryResult.records.length === 0) {
     return {
@@ -358,7 +304,11 @@ async function executeClientSideJoin(
     count: true,
   });
 
-  const secondaryResult = await fetchWithPagination(client, secondaryPath, maxRecords * 10, progress, "Secondary");
+  const secondaryResult = await paginatedFetch<Record<string, unknown>>(client, secondaryPath, {
+    maxRecords: maxRecords * 10,
+    progress,
+    label: "Secondary",
+  });
 
   // Build lookup map from secondary records (supports one-to-many)
   await progress.report("Performing join...");

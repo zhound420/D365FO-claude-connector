@@ -61,7 +61,7 @@ export function registerQueriesResource(server: McpServer): void {
       mimeType: "application/json",
     },
     async (uri) => {
-      const queries = loadSavedQueries();
+      const queries = await loadSavedQueries();
       const queryList = Object.values(queries);
 
       // Sort by name

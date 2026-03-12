@@ -10,65 +10,17 @@ import type { EnvironmentManager } from "../environment-manager.js";
 import { D365Client, D365Error } from "../d365-client.js";
 import type { ODataResponse } from "../types.js";
 import { ProgressReporter } from "../progress.js";
-import { environmentSchema, formatEnvironmentHeader } from "./common.js";
+import { environmentSchema, formatEnvironmentHeader, formatToolError } from "./common.js";
+import { fetchPageWithRetry, PAGINATION_TIMEOUT_MS } from "../utils/pagination.js";
+import { parseEnvInt } from "../utils/env-utils.js";
 
 /**
  * Limits for batch queries
  */
-const MAX_QUERIES = parseInt(process.env.D365_MAX_BATCH_QUERIES || "10", 10);
+const MAX_QUERIES = parseEnvInt("D365_MAX_BATCH_QUERIES", 10, 1, 100);
 const DEFAULT_TOP = 100;
 const DEFAULT_MAX_RECORDS = 5000;
-const MAX_CONCURRENT_REQUESTS = parseInt(process.env.D365_BATCH_CONCURRENCY || "5", 10);
-
-/**
- * Timeout for paginated requests (60 seconds - longer than default 30s)
- */
-const PAGINATION_TIMEOUT_MS = parseInt(process.env.D365_PAGINATION_TIMEOUT_MS || "60000", 10);
-
-/**
- * Maximum retries for individual page fetches within pagination
- */
-const PAGE_FETCH_MAX_RETRIES = 2;
-
-/**
- * Sleep helper for retry backoff
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/**
- * Fetch a single page with retry logic for pagination operations.
- */
-async function fetchPageWithRetry<T>(
-  client: D365Client,
-  url: string,
-  maxRetries: number = PAGE_FETCH_MAX_RETRIES
-): Promise<T> {
-  let lastError: Error | null = null;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await client.request<T>(url, {}, PAGINATION_TIMEOUT_MS);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-
-      if (error instanceof D365Error) {
-        if (error.statusCode === 401 || error.statusCode === 403 ||
-            error.statusCode === 404 || error.statusCode === 400) {
-          throw error;
-        }
-      }
-
-      if (attempt < maxRetries) {
-        const backoffMs = 2000 * Math.pow(2, attempt);
-        await sleep(backoffMs);
-      }
-    }
-  }
-
-  throw lastError || new Error("Page fetch failed after retries");
-}
+const MAX_CONCURRENT_REQUESTS = parseEnvInt("D365_BATCH_CONCURRENCY", 5, 1, 20);
 
 /**
  * Schema for a single query in the batch
@@ -221,19 +173,8 @@ async function executeSingleQuery(
   }
 }
 
-/**
- * Format error message from various error types
- */
-function formatError(error: unknown): string {
-  if (error instanceof D365Error) {
-    let message = error.message;
-    if (error.statusCode === 429 && error.retryAfter) {
-      message += ` (retry after ${error.retryAfter}s)`;
-    }
-    return message;
-  }
-  return error instanceof Error ? error.message : String(error);
-}
+// formatError delegates to the shared formatToolError from common.ts
+const formatError = (error: unknown): string => formatToolError(error);
 
 /**
  * Execute a query (with or without pagination)
@@ -250,42 +191,26 @@ async function executeQuery(
 }
 
 /**
- * Execute tasks with concurrency limit
+ * Execute tasks with concurrency limit using a worker-pool pattern.
+ * Each worker pulls the next available task until all are completed.
  */
 async function executeWithConcurrencyLimit<T>(
   tasks: (() => Promise<T>)[],
   limit: number
 ): Promise<T[]> {
-  const results: T[] = [];
-  const executing: Promise<void>[] = [];
+  const results: T[] = new Array(tasks.length);
+  let index = 0;
 
-  for (let i = 0; i < tasks.length; i++) {
-    const task = tasks[i];
-    const p = task().then((result) => {
-      results[i] = result;
-    });
-
-    executing.push(p);
-
-    if (executing.length >= limit) {
-      await Promise.race(executing);
-      // Remove completed promises
-      for (let j = executing.length - 1; j >= 0; j--) {
-        if (executing[j] !== undefined) {
-          // Check if promise is settled by racing with immediate resolve
-          const settled = await Promise.race([
-            executing[j].then(() => true, () => true),
-            Promise.resolve(false),
-          ]);
-          if (settled) {
-            executing.splice(j, 1);
-          }
-        }
-      }
+  async function worker(): Promise<void> {
+    while (index < tasks.length) {
+      const i = index++;
+      results[i] = await tasks[i]();
     }
   }
 
-  await Promise.all(executing);
+  await Promise.all(
+    Array.from({ length: Math.min(limit, tasks.length) }, () => worker())
+  );
   return results;
 }
 
