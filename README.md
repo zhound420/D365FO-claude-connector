@@ -57,15 +57,25 @@ All tools support an optional `environment` parameter to target specific D365 en
 
 ## Installation
 
+### From npm (Recommended)
+
 ```bash
-# Clone the repository
+npx @zhound/d365fo-mcp-server
+```
+
+Or install globally:
+
+```bash
+npm install -g @zhound/d365fo-mcp-server
+d365fo-mcp
+```
+
+### From Source
+
+```bash
 git clone https://github.com/zhound420/D365FO-claude-connector.git
-cd d365fo-mcp-server
-
-# Install dependencies
+cd D365FO-claude-connector
 npm install
-
-# Build
 npm run build
 ```
 

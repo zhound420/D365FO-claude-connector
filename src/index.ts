@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * D365 Finance & Operations MCP Server v3.0
  *

@@ -1,9 +1,34 @@
 {
-  "name": "d365fo-mcp-server",
-  "version": "2.0.0",
+  "name": "@zhound/d365fo-mcp-server",
+  "mcpName": "io.github.zhound420/d365fo-connector",
+  "version": "2.0.1",
   "description": "MCP server for D365 Finance & Operations with resources and tools",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "d365fo-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "dynamics-365",
+    "d365",
+    "finance-operations",
+    "erp",
+    "odata",
+    "model-context-protocol"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zhound420/D365FO-claude-connector"
+  },
+  "author": "zhound420",
+  "license": "MIT",
+  "homepage": "https://github.com/zhound420/D365FO-claude-connector#readme",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
@@ -11,7 +36,8 @@
     "setup": "node setup.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepare": "husky || true"
+    "prepare": "husky || true",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.0",

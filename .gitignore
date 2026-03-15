@@ -28,3 +28,6 @@ npm-debug.log*
 
 # Test coverage
 coverage/
+
+# MCP registry tokens
+.mcpregistry_*
